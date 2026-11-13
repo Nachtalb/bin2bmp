@@ -26,6 +26,10 @@ pub enum Mode {
     /// One pixel per byte, coloured by class: 0x00 black, 0xFF white,
     /// printable ASCII blue, everything else red.
     Class,
+    /// One pixel per `block` bytes, brightness = Shannon entropy of the block.
+    /// White is the most a block of that size can reach, so compressed or
+    /// encrypted data is bright and padding or repetition is dark.
+    Entropy { block: usize },
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -46,7 +50,7 @@ pub struct Image {
 impl Mode {
     pub fn palette(self) -> Palette {
         std::array::from_fn(|i| match (self, i as u8) {
-            (Mode::Bytes, v) => [v; 3],
+            (Mode::Bytes | Mode::Entropy { .. }, v) => [v; 3],
             (Mode::Class, 0x00) => [0; 3],
             (Mode::Class, 0xFF) => [255; 3],
             (Mode::Class, b'\t' | b'\n' | b'\r' | 0x20..=0x7E) => [55, 126, 184],
@@ -56,7 +60,78 @@ impl Mode {
 
     /// Number of pixels produced for `len` input bytes.
     pub fn pixel_count(self, len: u64) -> u64 {
-        len
+        match self {
+            Mode::Bytes | Mode::Class => len,
+            Mode::Entropy { block } => len.div_ceil(block.max(1) as u64),
+        }
+    }
+
+    fn check(self) -> io::Result<()> {
+        match self {
+            Mode::Entropy { block: 0 } => Err(invalid("block size must be at least 1")),
+            _ => Ok(()),
+        }
+    }
+}
+
+struct Entropy {
+    block: usize,
+    filled: usize,
+    hist: [usize; 256],
+    /// `c * log2(c)` for small counts; a log per count would dominate small blocks.
+    clog: Vec<f64>,
+    out: Vec<u8>,
+}
+
+impl Entropy {
+    fn new(block: usize) -> Self {
+        Self {
+            block,
+            filled: 0,
+            hist: [0; 256],
+            clog: (0..=block.min(4096)).map(Self::clog).collect(),
+            out: Vec::new(),
+        }
+    }
+
+    fn clog(count: usize) -> f64 {
+        if count == 0 {
+            0.0
+        } else {
+            count as f64 * (count as f64).log2()
+        }
+    }
+
+    fn feed(&mut self, mut chunk: &[u8]) {
+        while !chunk.is_empty() {
+            let n = (self.block - self.filled).min(chunk.len());
+            for &b in &chunk[..n] {
+                self.hist[b as usize] += 1;
+            }
+            chunk = &chunk[n..];
+            self.filled += n;
+            if self.filled == self.block {
+                self.emit();
+            }
+        }
+    }
+
+    fn emit(&mut self) {
+        if self.filled == 0 {
+            return;
+        }
+        let n = self.filled as f64;
+        let sum: f64 = self
+            .hist
+            .iter()
+            .map(|&c| self.clog.get(c).copied().unwrap_or_else(|| Self::clog(c)))
+            .sum();
+        let bits = n.log2() - sum / n;
+        let max_bits = (self.block as f64).log2().min(8.0);
+        let level = if max_bits > 0.0 { bits / max_bits } else { 0.0 };
+        self.out.push((level * 255.0).round() as u8);
+        self.hist = [0; 256];
+        self.filled = 0;
     }
 }
 
@@ -70,18 +145,33 @@ pub fn pixels(
     mut input: impl Read,
     mut sink: impl FnMut(&[u8]) -> io::Result<()>,
 ) -> io::Result<()> {
+    mode.check()?;
     let mut buf = vec![0u8; 1 << 18];
+    let mut entropy = match mode {
+        Mode::Entropy { block } => Some(Entropy::new(block)),
+        _ => None,
+    };
     loop {
         let n = match input.read(&mut buf) {
-            Ok(0) => return Ok(()),
+            Ok(0) => break,
             Ok(n) => n,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(e),
         };
-        match mode {
-            Mode::Bytes | Mode::Class => sink(&buf[..n])?,
+        match &mut entropy {
+            None => sink(&buf[..n])?,
+            Some(e) => {
+                e.feed(&buf[..n]);
+                sink(&e.out)?;
+                e.out.clear();
+            }
         }
     }
+    if let Some(mut e) = entropy {
+        e.emit();
+        sink(&e.out)?;
+    }
+    Ok(())
 }
 
 fn dims(count: u64, width: Option<u32>) -> io::Result<(u32, u32)> {
@@ -205,6 +295,7 @@ impl Image {
 
 /// Renders `data` into an in-memory image.
 pub fn render(data: &[u8], opts: &Options) -> io::Result<Image> {
+    opts.mode.check()?;
     let count = opts.mode.pixel_count(data.len() as u64);
     let (width, height) = dims(count, opts.width)?;
     let mut px = Vec::with_capacity(width as usize * height as usize);
@@ -229,6 +320,7 @@ pub fn write_bmp(
     out: impl Write,
     opts: &Options,
 ) -> io::Result<(u32, u32)> {
+    opts.mode.check()?;
     let (width, height) = dims(opts.mode.pixel_count(len), opts.width)?;
     let mut rows = RowWriter::new(out, width, height, &opts.mode.palette())?;
     pixels(opts.mode, input, |v| rows.push(v))?;
@@ -283,9 +375,54 @@ mod tests {
     }
 
     #[test]
+    fn entropy_spans_black_to_white_per_block() {
+        let mut data = vec![7u8; 256];
+        data.extend(0..=255u8);
+        data.extend([1, 2, 1, 2]);
+        let opts = Options {
+            mode: Mode::Entropy { block: 256 },
+            ..Options::default()
+        };
+        // constant block, every value once, then a 4-byte tail holding 1 bit/byte
+        assert_eq!(render(&data, &opts).unwrap().pixels[..3], [0, 255, 32]);
+    }
+
+    #[test]
+    fn entropy_blocks_ignore_read_boundaries() {
+        struct OneByOne<'a>(&'a [u8]);
+        impl Read for OneByOne<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                let n = self.0.len().min(1);
+                buf[..n].copy_from_slice(&self.0[..n]);
+                self.0 = &self.0[n..];
+                Ok(n)
+            }
+        }
+        let data: Vec<u8> = (0..5000u32).map(|i| (i * i % 253) as u8).collect();
+        let mode = Mode::Entropy { block: 7 };
+        let collect = |input: &mut dyn Read| {
+            let mut out = Vec::new();
+            pixels(mode, input, |v| {
+                out.extend_from_slice(v);
+                Ok(())
+            })
+            .unwrap();
+            out
+        };
+        let whole = collect(&mut &data[..]);
+        assert_eq!(whole.len() as u64, mode.pixel_count(data.len() as u64));
+        assert_eq!(collect(&mut OneByOne(&data)), whole);
+    }
+
+    #[test]
     fn refuses_what_bmp_cannot_hold() {
         let opts = Options::default();
         assert!(write_bmp(io::empty(), 0, io::sink(), &opts).is_err());
         assert!(write_bmp(io::empty(), 5 << 30, io::sink(), &opts).is_err());
+        let opts = Options {
+            mode: Mode::Entropy { block: 0 },
+            ..Options::default()
+        };
+        assert!(render(&[1], &opts).is_err());
     }
 }

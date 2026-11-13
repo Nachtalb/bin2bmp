@@ -18,6 +18,9 @@ Options:
                       bytes  one pixel per byte, value = brightness
                       class  one pixel per byte: 0x00 black, 0xFF white,
                              printable ASCII blue, everything else red
+                      entropy  one pixel per block, brightness = how random
+                               the block is (compressed/encrypted = white)
+  -b, --block N     bytes per pixel in entropy mode (default: 256)
 
 The canvas is as square as possible.";
 
@@ -25,9 +28,16 @@ fn bad(msg: String) -> io::Error {
     io::Error::other(format!("{msg} (see --help)"))
 }
 
+fn num<T: std::str::FromStr>(opt: &str, value: &str) -> io::Result<T> {
+    value
+        .parse()
+        .map_err(|_| bad(format!("{opt} needs a number, got '{value}'")))
+}
+
 fn run(args: &[String]) -> io::Result<()> {
     let mut opts = Options::default();
     let mut paths = Vec::new();
+    let (mut mode, mut block) = ("bytes", 256);
     let mut args = args.iter().map(String::as_str);
     while let Some(arg) = args.next() {
         let mut value = || {
@@ -35,18 +45,19 @@ fn run(args: &[String]) -> io::Result<()> {
                 .ok_or_else(|| bad(format!("{arg} needs a value")))
         };
         match arg {
-            "-m" | "--mode" => {
-                opts.mode = match value()? {
-                    "bytes" => Mode::Bytes,
-                    "class" => Mode::Class,
-                    other => return Err(bad(format!("unknown mode '{other}'"))),
-                }
-            }
+            "-m" | "--mode" => mode = value()?,
+            "-b" | "--block" => block = num(arg, value()?)?,
             "-" => paths.push(arg),
             _ if arg.starts_with('-') => return Err(bad(format!("unknown option '{arg}'"))),
             _ => paths.push(arg),
         }
     }
+    opts.mode = match mode {
+        "bytes" => Mode::Bytes,
+        "class" => Mode::Class,
+        "entropy" => Mode::Entropy { block },
+        other => return Err(bad(format!("unknown mode '{other}'"))),
+    };
     let mut paths = paths.into_iter();
     let input = paths.next().filter(|p| *p != "-");
     let output = paths.next().filter(|p| *p != "-");
