@@ -13,7 +13,7 @@ bin2bmp [OPTIONS] [INPUT] [OUTPUT]
 
 - `-m, --mode MODE` — what a pixel shows (default: `bytes`)
 - `-l, --layout LAYOUT` — where the pixels go (default: `rows`)
-- `-b, --block N` — bytes per pixel in `entropy` mode (default: 256)
+- `-b, --block N` — bytes per pixel in `entropy` mode (default: 256) and `chi` mode (default: 4096)
 - `--bit N` — which bit `bit` mode shows, 0 = lowest (default: 0)
 - `-w, --width N` — image width for the `rows` layout (default: as square as possible); a width matching the data's record size lines columns up
 
@@ -23,6 +23,7 @@ bin2bmp [OPTIONS] [INPUT] [OUTPUT]
 | `class` | one per byte: 0x00 black, 0xFF white, printable ASCII blue, everything else red | where text, padding and binary data sit |
 | `bit` | one per byte: white if one chosen bit is set | data hidden in the low bits of raw pixels or audio (LSB steganography): the hidden part is even static, the untouched part still shows traces of the picture |
 | `entropy` | one per block, brightness = Shannon entropy of the block | where the compressed or encrypted blobs are: they come out white, padding and repetition dark |
+| `chi` | one per block: white where the values 2k and 2k+1 occur equally often (chi-square test) | which part of raw pixels or audio has had its lowest bits overwritten; compressed or encrypted data is white everywhere, so only use it on raw data |
 | `digraph` | always 256×256: pixel (x, y) = how often byte x is followed by byte y, log scale | what kind of data it is; text, machine code and images each draw a recognisable shape |
 
 | Layout | Placement | Trade-off |

@@ -34,6 +34,11 @@ pub enum Mode {
     /// White is the most a block of that size can reach, so compressed or
     /// encrypted data is bright and padding or repetition is dark.
     Entropy { block: usize },
+    /// One pixel per `block` bytes: the chi-square test for data hidden in
+    /// the lowest bit. White means the values 2k and 2k+1 occur equally
+    /// often, which raw pixels or samples only do once their lowest bits
+    /// have been overwritten. Compressed or encrypted data is white anyway.
+    Chi { block: usize },
     /// Always 256×256: pixel (x, y) is how often byte `x` is followed by
     /// byte `y`, on a log scale. File formats have recognisable shapes.
     Digraph,
@@ -78,7 +83,7 @@ pub struct Image {
 impl Mode {
     pub fn palette(self) -> Palette {
         std::array::from_fn(|i| match (self, i as u8) {
-            (Mode::Bytes | Mode::Entropy { .. } | Mode::Digraph, v) => [v; 3],
+            (Mode::Bytes | Mode::Entropy { .. } | Mode::Chi { .. } | Mode::Digraph, v) => [v; 3],
             (Mode::Bit { bit }, v) => [255 * (v >> bit & 1); 3],
             (Mode::Class, 0x00) => [0; 3],
             (Mode::Class, 0xFF) => [255; 3],
@@ -91,22 +96,26 @@ impl Mode {
     pub fn pixel_count(self, len: u64) -> u64 {
         match self {
             Mode::Bytes | Mode::Class | Mode::Bit { .. } => len,
-            Mode::Entropy { block } => len.div_ceil(block.max(1) as u64),
+            Mode::Entropy { block } | Mode::Chi { block } => len.div_ceil(block.max(1) as u64),
             Mode::Digraph => 65536 * len.min(1),
         }
     }
 
     fn check(self) -> io::Result<()> {
         match self {
-            Mode::Entropy { block: 0 } => Err(invalid("block size must be at least 1")),
+            Mode::Entropy { block: 0 } | Mode::Chi { block: 0 } => {
+                Err(invalid("block size must be at least 1"))
+            }
             Mode::Bit { bit: 8.. } => Err(invalid("a byte only has bits 0 to 7")),
             _ => Ok(()),
         }
     }
 }
 
-struct Entropy {
+/// Per-block statistics over a byte histogram.
+struct Blocks {
     block: usize,
+    chi: bool,
     filled: usize,
     hist: [usize; 256],
     /// `c * log2(c)` for small counts; a log per count would dominate small blocks.
@@ -114,10 +123,11 @@ struct Entropy {
     out: Vec<u8>,
 }
 
-impl Entropy {
-    fn new(block: usize) -> Self {
+impl Blocks {
+    fn new(block: usize, chi: bool) -> Self {
         Self {
             block,
+            chi,
             filled: 0,
             hist: [0; 256],
             clog: (0..=block.min(4096)).map(Self::clog).collect(),
@@ -151,6 +161,19 @@ impl Entropy {
         if self.filled == 0 {
             return;
         }
+        let level = if self.chi {
+            self.chi_level()
+        } else {
+            self.entropy_level()
+        };
+        self.out.push((level * 255.0).round() as u8);
+        self.hist = [0; 256];
+        self.filled = 0;
+    }
+}
+
+impl Blocks {
+    fn entropy_level(&self) -> f64 {
         let n = self.filled as f64;
         let sum: f64 = self
             .hist
@@ -159,10 +182,45 @@ impl Entropy {
             .sum();
         let bits = n.log2() - sum / n;
         let max_bits = (self.block as f64).log2().min(8.0);
-        let level = if max_bits > 0.0 { bits / max_bits } else { 0.0 };
-        self.out.push((level * 255.0).round() as u8);
-        self.hist = [0; 256];
-        self.filled = 0;
+        if max_bits > 0.0 {
+            bits / max_bits
+        } else {
+            0.0
+        }
+    }
+
+    /// Probability that the block's value pairs are as evenly split as
+    /// overwritten low bits would make them.
+    fn chi_level(&self) -> f64 {
+        let (mut stat, mut pairs) = (0.0, 0);
+        for pair in self.hist.as_chunks::<2>().0 {
+            let expected = (pair[0] + pair[1]) as f64 / 2.0;
+            if expected > 4.0 {
+                stat += (pair[0] as f64 - expected).powi(2) / expected;
+                pairs += 1;
+            }
+        }
+        if pairs < 2 {
+            0.0
+        } else {
+            chi_square_tail(stat, (pairs - 1) as f64)
+        }
+    }
+}
+
+/// P(X > `stat`) for a chi-square variable with `k` degrees of freedom
+/// (Wilson–Hilferty, good to about 0.01).
+fn chi_square_tail(stat: f64, k: f64) -> f64 {
+    let z = ((stat / k).cbrt() - (1.0 - 2.0 / (9.0 * k))) / (2.0 / (9.0 * k)).sqrt();
+    let x = z.abs() / std::f64::consts::SQRT_2;
+    let t = 1.0 / (1.0 + 0.3275911 * x);
+    let poly =
+        0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429)));
+    let half_erfc = t * poly * (-x * x).exp() / 2.0;
+    if z > 0.0 {
+        half_erfc
+    } else {
+        1.0 - half_erfc
     }
 }
 
@@ -210,7 +268,7 @@ impl Digraph {
 
 enum State {
     PerByte,
-    Entropy(Box<Entropy>),
+    Blocks(Box<Blocks>),
     Digraph(Digraph),
 }
 
@@ -224,7 +282,8 @@ pub fn pixels(
     let mut buf = vec![0u8; 1 << 18];
     let mut state = match mode {
         Mode::Bytes | Mode::Class | Mode::Bit { .. } => State::PerByte,
-        Mode::Entropy { block } => State::Entropy(Box::new(Entropy::new(block))),
+        Mode::Entropy { block } => State::Blocks(Box::new(Blocks::new(block, false))),
+        Mode::Chi { block } => State::Blocks(Box::new(Blocks::new(block, true))),
         Mode::Digraph => State::Digraph(Digraph {
             counts: vec![0; 65536],
             prev: None,
@@ -241,7 +300,7 @@ pub fn pixels(
         any = true;
         match &mut state {
             State::PerByte => sink(&buf[..n])?,
-            State::Entropy(e) => {
+            State::Blocks(e) => {
                 e.feed(&buf[..n]);
                 sink(&e.out)?;
                 e.out.clear();
@@ -251,7 +310,7 @@ pub fn pixels(
     }
     match state {
         State::PerByte => Ok(()),
-        State::Entropy(mut e) => {
+        State::Blocks(mut e) => {
             e.emit();
             sink(&e.out)
         }
@@ -564,6 +623,30 @@ mod tests {
         };
         // constant block, every value once, then a 4-byte tail holding 1 bit/byte
         assert_eq!(render(&data, &opts).unwrap().pixels[..3], [0, 255, 32]);
+    }
+
+    #[test]
+    fn chi_is_white_only_where_value_pairs_are_evenly_split() {
+        let even_only: Vec<u8> = (0..1024u32).map(|i| (i % 32 * 2) as u8).collect();
+        let split: Vec<u8> = (0..1024u32).map(|i| (i % 64) as u8).collect();
+        let data = [even_only, split, vec![7; 3]].concat();
+        let opts = Options {
+            mode: Mode::Chi { block: 1024 },
+            ..Options::default()
+        };
+        // odd values never occur, even split, tail too short to judge
+        assert_eq!(render(&data, &opts).unwrap().pixels[..3], [0, 255, 0]);
+    }
+
+    #[test]
+    fn chi_square_tail_matches_the_tables() {
+        for (stat, k, p) in [
+            (18.307, 10.0, 0.05),
+            (31.0, 31.0, 0.466),
+            (3.94, 10.0, 0.95),
+        ] {
+            assert!((chi_square_tail(stat, k) - p).abs() < 0.01, "{stat} {k}");
+        }
     }
 
     #[test]

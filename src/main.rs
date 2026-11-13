@@ -22,6 +22,9 @@ Options:
                                   is set; shows data hidden in the low bits
                          entropy  one pixel per block, brightness = how random
                                   the block is (compressed/encrypted = white)
+                         chi      one pixel per block, white where the lowest
+                                  bits look overwritten (hidden data in raw
+                                  pixels or audio)
                          digraph  256x256 plot of which byte follows which;
                                   file formats have recognisable shapes
   -l, --layout LAYOUT  where the pixels go (default: rows)
@@ -29,6 +32,7 @@ Options:
                          hilbert  along a Hilbert curve: regions of the file
                                   become compact patches instead of stripes
   -b, --block N        bytes per pixel in entropy mode (default: 256)
+                       and chi mode (default: 4096)
       --bit N          which bit bit mode shows, 0 = lowest (default: 0)
   -w, --width N        image width for the rows layout
                        (default: as square as possible)";
@@ -46,7 +50,7 @@ fn num<T: std::str::FromStr>(opt: &str, value: &str) -> io::Result<T> {
 fn run(args: &[String]) -> io::Result<()> {
     let mut opts = Options::default();
     let mut paths = Vec::new();
-    let (mut mode, mut block, mut bit) = ("bytes", 256, 0);
+    let (mut mode, mut block, mut bit) = ("bytes", None, 0);
     let mut args = args.iter().map(String::as_str);
     while let Some(arg) = args.next() {
         let mut value = || {
@@ -62,7 +66,7 @@ fn run(args: &[String]) -> io::Result<()> {
                     other => return Err(bad(format!("unknown layout '{other}'"))),
                 }
             }
-            "-b" | "--block" => block = num(arg, value()?)?,
+            "-b" | "--block" => block = Some(num(arg, value()?)?),
             "--bit" => bit = num(arg, value()?)?,
             "-w" | "--width" => opts.width = Some(num(arg, value()?)?),
             "-" => paths.push(arg),
@@ -74,7 +78,12 @@ fn run(args: &[String]) -> io::Result<()> {
         "bytes" => Mode::Bytes,
         "class" => Mode::Class,
         "bit" => Mode::Bit { bit },
-        "entropy" => Mode::Entropy { block },
+        "entropy" => Mode::Entropy {
+            block: block.unwrap_or(256),
+        },
+        "chi" => Mode::Chi {
+            block: block.unwrap_or(4096),
+        },
         "digraph" => Mode::Digraph,
         other => return Err(bad(format!("unknown mode '{other}'"))),
     };
