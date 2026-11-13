@@ -5,23 +5,53 @@ use std::{
     process::ExitCode,
 };
 
-use bin2bmp::{write_bmp, Options};
+use bin2bmp::{write_bmp, Mode, Options};
 
 const USAGE: &str = "\
-Usage: bin2bmp [INPUT] [OUTPUT]
+Usage: bin2bmp [OPTIONS] [INPUT] [OUTPUT]
 
   INPUT   path to binary file, or '-' for stdin  (default: stdin)
   OUTPUT  path for .bmp output, or '-' for stdout (default: stdout)
 
-Each byte becomes one grayscale pixel. Canvas is as square as possible.";
+Options:
+  -m, --mode MODE   what a pixel shows (default: bytes)
+                      bytes  one pixel per byte, value = brightness
+                      class  one pixel per byte: 0x00 black, 0xFF white,
+                             printable ASCII blue, everything else red
+
+The canvas is as square as possible.";
+
+fn bad(msg: String) -> io::Error {
+    io::Error::other(format!("{msg} (see --help)"))
+}
 
 fn run(args: &[String]) -> io::Result<()> {
-    let opts = Options::default();
-    let mut paths = args.iter().map(String::as_str);
+    let mut opts = Options::default();
+    let mut paths = Vec::new();
+    let mut args = args.iter().map(String::as_str);
+    while let Some(arg) = args.next() {
+        let mut value = || {
+            args.next()
+                .ok_or_else(|| bad(format!("{arg} needs a value")))
+        };
+        match arg {
+            "-m" | "--mode" => {
+                opts.mode = match value()? {
+                    "bytes" => Mode::Bytes,
+                    "class" => Mode::Class,
+                    other => return Err(bad(format!("unknown mode '{other}'"))),
+                }
+            }
+            "-" => paths.push(arg),
+            _ if arg.starts_with('-') => return Err(bad(format!("unknown option '{arg}'"))),
+            _ => paths.push(arg),
+        }
+    }
+    let mut paths = paths.into_iter();
     let input = paths.next().filter(|p| *p != "-");
     let output = paths.next().filter(|p| *p != "-");
     if let Some(extra) = paths.next() {
-        return Err(io::Error::other(format!("unexpected argument '{extra}'")));
+        return Err(bad(format!("unexpected argument '{extra}'")));
     }
 
     // Only a regular file knows its length up front; anything else is buffered.

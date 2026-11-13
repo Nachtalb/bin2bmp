@@ -1,21 +1,28 @@
 # bin2bmp
 
-Visualize any binary file as a grayscale bitmap. Each byte becomes one pixel — value 0x00 is black, 0xFF is white. The canvas is as square as possible.
+Visualize any binary file as a bitmap, so its structure shows: code, text, tables, padding, compressed blobs. The canvas is as square as possible.
 
 ## Usage
 
 ```sh
-bin2bmp [INPUT] [OUTPUT]
+bin2bmp [OPTIONS] [INPUT] [OUTPUT]
 ```
 
 - `INPUT`  — path to a binary file, or `-` for stdin (default: stdin)
 - `OUTPUT` — path for the `.bmp` output, or `-` for stdout (default: stdout)
 
+- `-m, --mode MODE` — what a pixel shows (default: `bytes`)
+
+| Mode | Pixel | Shows |
+|------|-------|-------|
+| `bytes` | one per byte, value = brightness (0x00 black, 0xFF white) | the texture of the data |
+| `class` | one per byte: 0x00 black, 0xFF white, printable ASCII blue, everything else red | where text, padding and binary data sit |
+
 **Examples:**
 
 ```sh
 bin2bmp firmware.bin firmware.bmp
-bin2bmp /usr/bin/ls ls.bmp
+bin2bmp -m class /usr/bin/ls ls.bmp
 cat binary | bin2bmp - output.bmp
 bin2bmp input.bin | magick - output.png   # pipe to ImageMagick for PNG
 ```

@@ -23,6 +23,9 @@ pub enum Mode {
     /// One pixel per byte, value = brightness.
     #[default]
     Bytes,
+    /// One pixel per byte, coloured by class: 0x00 black, 0xFF white,
+    /// printable ASCII blue, everything else red.
+    Class,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -42,7 +45,13 @@ pub struct Image {
 
 impl Mode {
     pub fn palette(self) -> Palette {
-        std::array::from_fn(|i| [i as u8; 3])
+        std::array::from_fn(|i| match (self, i as u8) {
+            (Mode::Bytes, v) => [v; 3],
+            (Mode::Class, 0x00) => [0; 3],
+            (Mode::Class, 0xFF) => [255; 3],
+            (Mode::Class, b'\t' | b'\n' | b'\r' | 0x20..=0x7E) => [55, 126, 184],
+            (Mode::Class, _) => [228, 26, 28],
+        })
     }
 
     /// Number of pixels produced for `len` input bytes.
@@ -70,7 +79,7 @@ pub fn pixels(
             Err(e) => return Err(e),
         };
         match mode {
-            Mode::Bytes => sink(&buf[..n])?,
+            Mode::Bytes | Mode::Class => sink(&buf[..n])?,
         }
     }
 }
@@ -258,6 +267,19 @@ mod tests {
             render(&data, &opts).unwrap().write_bmp(&mut mem).unwrap();
             assert_eq!(stream(&data, &opts), mem, "width {width:?}");
         }
+    }
+
+    #[test]
+    fn class_mode_only_swaps_the_palette() {
+        let data = [0x00, b'a', 0x90, 0xFF];
+        let class = Options {
+            mode: Mode::Class,
+            ..Options::default()
+        };
+        let image = render(&data, &class).unwrap();
+        assert_eq!(image.pixels, data);
+        let colours = data.map(|b| image.palette[b as usize]);
+        assert_eq!(colours, [[0; 3], [55, 126, 184], [228, 26, 28], [255; 3]]);
     }
 
     #[test]
