@@ -35,12 +35,32 @@ pub enum Mode {
     Digraph,
 }
 
+/// Where pixel number `i` lands in the image.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Layout {
+    /// Left to right, top to bottom. Streams in constant memory.
+    #[default]
+    Rows,
+    /// Along a Hilbert curve, so data that is close in the file stays close
+    /// in the image and each region becomes a compact patch instead of a
+    /// stripe. The whole image is held in memory.
+    Hilbert,
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Options {
     pub mode: Mode,
+    /// Ignored by [`Mode::Digraph`], which has its own fixed layout.
+    pub layout: Layout,
     /// Image width in pixels; `None` picks a near-square canvas.
-    /// Ignored by [`Mode::Digraph`].
+    /// Only used by [`Layout::Rows`].
     pub width: Option<u32>,
+}
+
+impl Options {
+    fn hilbert(&self) -> bool {
+        self.layout == Layout::Hilbert && self.mode != Mode::Digraph
+    }
 }
 
 /// Row-major palette indices, top row first.
@@ -355,16 +375,82 @@ impl Image {
     }
 }
 
-/// Renders `data` into an in-memory image.
-pub fn render(data: &[u8], opts: &Options) -> io::Result<Image> {
+/// Lays `values` along the Hilbert curve through the `size`-wide square whose
+/// first cell is `(x, y)`. The curve sets off along `a` and ends along `b`.
+fn hilbert_walk(
+    values: &mut std::slice::Iter<u8>,
+    px: &mut [u8],
+    width: usize,
+    (x, y): (isize, isize),
+    a: (isize, isize),
+    b: (isize, isize),
+    size: isize,
+) {
+    let at = |i: isize, j: isize| (x + a.0 * i + b.0 * j, y + a.1 * i + b.1 * j);
+    if size == 2 {
+        for ((x, y), &v) in [at(0, 0), at(1, 0), at(1, 1), at(0, 1)]
+            .into_iter()
+            .zip(values)
+        {
+            px[y as usize * width + x as usize] = v;
+        }
+    } else if values.len() > 0 {
+        let h = size / 2;
+        hilbert_walk(values, px, width, at(0, 0), b, a, h);
+        hilbert_walk(values, px, width, at(h, 0), a, b, h);
+        hilbert_walk(values, px, width, at(h, h), a, b, h);
+        hilbert_walk(
+            values,
+            px,
+            width,
+            at(h - 1, size - 1),
+            (-b.0, -b.1),
+            (-a.0, -a.1),
+            h,
+        );
+    }
+}
+
+fn hilbert(values: &[u8]) -> (u32, u32, Vec<u8>) {
+    let mut side = 1;
+    while side * side < values.len() {
+        side *= 2;
+    }
+    if side == 1 {
+        return (1, 1, values.to_vec());
+    }
+    // The curve starts downwards, so its first half stays in the left half.
+    let width = if values.len() * 2 <= side * side {
+        side / 2
+    } else {
+        side
+    };
+    let mut px = vec![0; width * side];
+    hilbert_walk(
+        &mut values.iter(),
+        &mut px,
+        width,
+        (0, 0),
+        (0, 1),
+        (1, 0),
+        side as isize,
+    );
+    (width as u32, side as u32, px)
+}
+
+fn collect(input: impl Read, len: u64, opts: &Options) -> io::Result<Image> {
     opts.mode.check()?;
-    let (width, height) = dims(opts, data.len() as u64)?;
-    let mut px = Vec::with_capacity(width as usize * height as usize);
-    pixels(opts.mode, data, |v| {
+    let (mut width, mut height) = dims(opts, len)?;
+    let mut px = Vec::with_capacity(opts.mode.pixel_count(len) as usize);
+    pixels(opts.mode, input, |v| {
         px.extend_from_slice(v);
         Ok(())
     })?;
-    px.resize(width as usize * height as usize, 0);
+    if opts.hilbert() {
+        (width, height, px) = hilbert(&px);
+    } else {
+        px.resize(width as usize * height as usize, 0);
+    }
     Ok(Image {
         width,
         height,
@@ -373,14 +459,24 @@ pub fn render(data: &[u8], opts: &Options) -> io::Result<Image> {
     })
 }
 
-/// Streams `input` (exactly `len` bytes) to `out` as a BMP and returns its
-/// width and height. Memory use is constant regardless of `len`.
+/// Renders `data` into an in-memory image.
+pub fn render(data: &[u8], opts: &Options) -> io::Result<Image> {
+    collect(data, data.len() as u64, opts)
+}
+
+/// Writes `input` (exactly `len` bytes) to `out` as a BMP and returns its
+/// width and height. With [`Layout::Rows`] this streams in constant memory.
 pub fn write_bmp(
     input: impl Read,
     len: u64,
     out: impl Write,
     opts: &Options,
 ) -> io::Result<(u32, u32)> {
+    if opts.hilbert() {
+        let image = collect(input, len, opts)?;
+        image.write_bmp(out)?;
+        return Ok((image.width, image.height));
+    }
     opts.mode.check()?;
     let (width, height) = dims(opts, len)?;
     let mut rows = RowWriter::new(out, width, height, &opts.mode.palette())?;
@@ -479,6 +575,7 @@ mod tests {
     fn digraph_plots_byte_pairs() {
         let opts = Options {
             mode: Mode::Digraph,
+            layout: Layout::Hilbert,
             width: Some(3),
         };
         let image = render(&[1, 2, 1, 2, 1, 9], &opts).unwrap();
@@ -488,6 +585,42 @@ mod tests {
         assert_eq!((at(1, 2), at(2, 1)), (255, 255));
         assert!(at(1, 9) > 0 && at(1, 9) < 255);
         assert_eq!(image.pixels.iter().filter(|&&p| p > 0).count(), 3);
+    }
+
+    #[test]
+    fn hilbert_curve_visits_every_cell_through_neighbours() {
+        let values: Vec<u8> = (0..=255).collect();
+        let (width, height, px) = hilbert(&values);
+        assert_eq!((width, height), (16, 16));
+        let cell = |v: u8| {
+            let i = px.iter().position(|&p| p == v).unwrap();
+            (i % 16, i / 16)
+        };
+        assert_eq!(cell(0), (0, 0));
+        for v in 0..255 {
+            let ((x0, y0), (x1, y1)) = (cell(v), cell(v + 1));
+            assert_eq!(x0.abs_diff(x1) + y0.abs_diff(y1), 1, "step {v}");
+        }
+    }
+
+    #[test]
+    fn hilbert_layout_keeps_every_pixel_and_crops_the_unused_half() {
+        let hilbert = Options {
+            layout: Layout::Hilbert,
+            ..Options::default()
+        };
+        let full = render(&[9; 200], &hilbert).unwrap();
+        assert_eq!((full.width, full.height), (16, 16));
+        assert_eq!(full.pixels.iter().filter(|&&p| p == 9).count(), 200);
+        let half = render(&[9; 128], &hilbert).unwrap();
+        assert_eq!((half.width, half.height), (8, 16));
+        assert_eq!(half.pixels, [9; 128]);
+        assert_eq!(render(&[9], &hilbert).unwrap().pixels, [9]);
+
+        let mut bmp = Vec::new();
+        let dims = write_bmp(&[9u8; 128][..], 128, &mut bmp, &hilbert).unwrap();
+        assert_eq!(dims, (8, 16));
+        assert_eq!(bmp.len(), PIXEL_OFFSET as usize + 128);
     }
 
     #[test]

@@ -12,8 +12,9 @@ bin2bmp [OPTIONS] [INPUT] [OUTPUT]
 - `OUTPUT` — path for the `.bmp` output, or `-` for stdout (default: stdout)
 
 - `-m, --mode MODE` — what a pixel shows (default: `bytes`)
+- `-l, --layout LAYOUT` — where the pixels go (default: `rows`)
 - `-b, --block N` — bytes per pixel in `entropy` mode (default: 256)
-- `-w, --width N` — image width in pixels (default: as square as possible); a width matching the data's record size lines columns up
+- `-w, --width N` — image width for the `rows` layout (default: as square as possible); a width matching the data's record size lines columns up
 
 | Mode | Pixel | Shows |
 |------|-------|-------|
@@ -22,17 +23,23 @@ bin2bmp [OPTIONS] [INPUT] [OUTPUT]
 | `entropy` | one per block, brightness = Shannon entropy of the block | where the compressed or encrypted blobs are: they come out white, padding and repetition dark |
 | `digraph` | always 256×256: pixel (x, y) = how often byte x is followed by byte y, log scale | what kind of data it is; text, machine code and images each draw a recognisable shape |
 
+| Layout | Placement | Trade-off |
+|--------|-----------|-----------|
+| `rows` | left to right, top to bottom | offsets are easy to read off, but a region of the file smears into a stripe across several rows; streams in constant memory |
+| `hilbert` | along a [Hilbert curve](https://en.wikipedia.org/wiki/Hilbert_curve) on a power-of-two square | bytes close in the file stay close in the image, so each region is one compact patch; the image is held in memory |
+
 **Examples:**
 
 ```sh
 bin2bmp firmware.bin firmware.bmp
 bin2bmp -m class /usr/bin/ls ls.bmp
 bin2bmp -m entropy -b 4096 disk.img disk.bmp   # 4096× smaller than the input
+bin2bmp -m class -l hilbert firmware.bin map.bmp
 cat binary | bin2bmp - output.bmp
 bin2bmp input.bin | magick - output.png   # pipe to ImageMagick for PNG
 ```
 
-A regular file is streamed in constant memory. Stdin and other inputs of unknown length are buffered first, because the BMP header needs the size.
+With the `rows` layout a regular file is streamed in constant memory. Stdin and other inputs of unknown length are buffered first, because the BMP header needs the size.
 
 ## Library
 
@@ -44,13 +51,14 @@ bin2bmp = { git = "https://github.com/Nachtalb/bin2bmp" }
 ```
 
 ```rust
-use bin2bmp::{render, write_bmp, Options};
+use bin2bmp::{render, write_bmp, Layout, Mode, Options};
 
 // In memory: palette indices plus palette, ready for any image encoder or canvas.
-let image = render(&data, &Options::default())?;
+let opts = Options { mode: Mode::Entropy { block: 256 }, layout: Layout::Hilbert, width: None };
+let image = render(&data, &opts)?;
 println!("{}x{}", image.width, image.height);
 
-// Streamed straight to any `Write`, in constant memory.
+// Straight to any `Write`; the rows layout streams in constant memory.
 let file = std::fs::File::open("firmware.bin")?;
 let len = file.metadata()?.len();
 write_bmp(file, len, std::io::stdout().lock(), &Options::default())?;

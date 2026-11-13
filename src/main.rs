@@ -5,7 +5,7 @@ use std::{
     process::ExitCode,
 };
 
-use bin2bmp::{write_bmp, Mode, Options};
+use bin2bmp::{write_bmp, Layout, Mode, Options};
 
 const USAGE: &str = "\
 Usage: bin2bmp [OPTIONS] [INPUT] [OUTPUT]
@@ -14,17 +14,21 @@ Usage: bin2bmp [OPTIONS] [INPUT] [OUTPUT]
   OUTPUT  path for .bmp output, or '-' for stdout (default: stdout)
 
 Options:
-  -m, --mode MODE   what a pixel shows (default: bytes)
-                      bytes  one pixel per byte, value = brightness
-                      class  one pixel per byte: 0x00 black, 0xFF white,
-                             printable ASCII blue, everything else red
-                      entropy  one pixel per block, brightness = how random
-                               the block is (compressed/encrypted = white)
-                      digraph  256x256 plot of which byte follows which;
-                               file formats have recognisable shapes
-  -b, --block N     bytes per pixel in entropy mode (default: 256)
-  -w, --width N     image width in pixels (default: as square as possible)
-";
+  -m, --mode MODE      what a pixel shows (default: bytes)
+                         bytes    one pixel per byte, value = brightness
+                         class    one pixel per byte: 0x00 black, 0xFF white,
+                                  printable ASCII blue, everything else red
+                         entropy  one pixel per block, brightness = how random
+                                  the block is (compressed/encrypted = white)
+                         digraph  256x256 plot of which byte follows which;
+                                  file formats have recognisable shapes
+  -l, --layout LAYOUT  where the pixels go (default: rows)
+                         rows     left to right, top to bottom
+                         hilbert  along a Hilbert curve: regions of the file
+                                  become compact patches instead of stripes
+  -b, --block N        bytes per pixel in entropy mode (default: 256)
+  -w, --width N        image width for the rows layout
+                       (default: as square as possible)";
 
 fn bad(msg: String) -> io::Error {
     io::Error::other(format!("{msg} (see --help)"))
@@ -48,6 +52,13 @@ fn run(args: &[String]) -> io::Result<()> {
         };
         match arg {
             "-m" | "--mode" => mode = value()?,
+            "-l" | "--layout" => {
+                opts.layout = match value()? {
+                    "rows" => Layout::Rows,
+                    "hilbert" => Layout::Hilbert,
+                    other => return Err(bad(format!("unknown layout '{other}'"))),
+                }
+            }
             "-b" | "--block" => block = num(arg, value()?)?,
             "-w" | "--width" => opts.width = Some(num(arg, value()?)?),
             "-" => paths.push(arg),
