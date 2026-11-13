@@ -26,6 +26,10 @@ pub enum Mode {
     /// One pixel per byte, coloured by class: 0x00 black, 0xFF white,
     /// printable ASCII blue, everything else red.
     Class,
+    /// One pixel per byte: white if bit `bit` (0 = lowest) is set. The low
+    /// bits of raw pixels or samples look like the picture's noise; data
+    /// hidden in them looks like even static instead.
+    Bit { bit: u8 },
     /// One pixel per `block` bytes, brightness = Shannon entropy of the block.
     /// White is the most a block of that size can reach, so compressed or
     /// encrypted data is bright and padding or repetition is dark.
@@ -75,6 +79,7 @@ impl Mode {
     pub fn palette(self) -> Palette {
         std::array::from_fn(|i| match (self, i as u8) {
             (Mode::Bytes | Mode::Entropy { .. } | Mode::Digraph, v) => [v; 3],
+            (Mode::Bit { bit }, v) => [255 * (v >> bit & 1); 3],
             (Mode::Class, 0x00) => [0; 3],
             (Mode::Class, 0xFF) => [255; 3],
             (Mode::Class, b'\t' | b'\n' | b'\r' | 0x20..=0x7E) => [55, 126, 184],
@@ -85,7 +90,7 @@ impl Mode {
     /// Number of pixels produced for `len` input bytes.
     pub fn pixel_count(self, len: u64) -> u64 {
         match self {
-            Mode::Bytes | Mode::Class => len,
+            Mode::Bytes | Mode::Class | Mode::Bit { .. } => len,
             Mode::Entropy { block } => len.div_ceil(block.max(1) as u64),
             Mode::Digraph => 65536 * len.min(1),
         }
@@ -94,6 +99,7 @@ impl Mode {
     fn check(self) -> io::Result<()> {
         match self {
             Mode::Entropy { block: 0 } => Err(invalid("block size must be at least 1")),
+            Mode::Bit { bit: 8.. } => Err(invalid("a byte only has bits 0 to 7")),
             _ => Ok(()),
         }
     }
@@ -217,7 +223,7 @@ pub fn pixels(
     mode.check()?;
     let mut buf = vec![0u8; 1 << 18];
     let mut state = match mode {
-        Mode::Bytes | Mode::Class => State::PerByte,
+        Mode::Bytes | Mode::Class | Mode::Bit { .. } => State::PerByte,
         Mode::Entropy { block } => State::Entropy(Box::new(Entropy::new(block))),
         Mode::Digraph => State::Digraph(Digraph {
             counts: vec![0; 65536],
@@ -529,6 +535,22 @@ mod tests {
         assert_eq!(image.pixels, data);
         let colours = data.map(|b| image.palette[b as usize]);
         assert_eq!(colours, [[0; 3], [55, 126, 184], [228, 26, 28], [255; 3]]);
+    }
+
+    #[test]
+    fn bit_mode_shows_one_bit_plane() {
+        let opts = |bit| Options {
+            mode: Mode::Bit { bit },
+            ..Options::default()
+        };
+        let image = render(&[0b1000_0001, 0b0000_0010], &opts(0)).unwrap();
+        let shown = |image: &Image| [0, 1].map(|i| image.palette[image.pixels[i] as usize]);
+        assert_eq!(shown(&image), [[255; 3], [0; 3]]);
+        let image = render(&[0b1000_0001, 0b0000_0010], &opts(7)).unwrap();
+        assert_eq!(shown(&image), [[255; 3], [0; 3]]);
+        let image = render(&[0b1000_0001, 0b0000_0010], &opts(1)).unwrap();
+        assert_eq!(shown(&image), [[0; 3], [255; 3]]);
+        assert!(render(&[1], &opts(8)).is_err());
     }
 
     #[test]

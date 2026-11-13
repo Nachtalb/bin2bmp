@@ -18,6 +18,8 @@ Options:
                          bytes    one pixel per byte, value = brightness
                          class    one pixel per byte: 0x00 black, 0xFF white,
                                   printable ASCII blue, everything else red
+                         bit      one pixel per byte: white if one chosen bit
+                                  is set; shows data hidden in the low bits
                          entropy  one pixel per block, brightness = how random
                                   the block is (compressed/encrypted = white)
                          digraph  256x256 plot of which byte follows which;
@@ -27,6 +29,7 @@ Options:
                          hilbert  along a Hilbert curve: regions of the file
                                   become compact patches instead of stripes
   -b, --block N        bytes per pixel in entropy mode (default: 256)
+      --bit N          which bit bit mode shows, 0 = lowest (default: 0)
   -w, --width N        image width for the rows layout
                        (default: as square as possible)";
 
@@ -43,7 +46,7 @@ fn num<T: std::str::FromStr>(opt: &str, value: &str) -> io::Result<T> {
 fn run(args: &[String]) -> io::Result<()> {
     let mut opts = Options::default();
     let mut paths = Vec::new();
-    let (mut mode, mut block) = ("bytes", 256);
+    let (mut mode, mut block, mut bit) = ("bytes", 256, 0);
     let mut args = args.iter().map(String::as_str);
     while let Some(arg) = args.next() {
         let mut value = || {
@@ -60,6 +63,7 @@ fn run(args: &[String]) -> io::Result<()> {
                 }
             }
             "-b" | "--block" => block = num(arg, value()?)?,
+            "--bit" => bit = num(arg, value()?)?,
             "-w" | "--width" => opts.width = Some(num(arg, value()?)?),
             "-" => paths.push(arg),
             _ if arg.starts_with('-') => return Err(bad(format!("unknown option '{arg}'"))),
@@ -69,6 +73,7 @@ fn run(args: &[String]) -> io::Result<()> {
     opts.mode = match mode {
         "bytes" => Mode::Bytes,
         "class" => Mode::Class,
+        "bit" => Mode::Bit { bit },
         "entropy" => Mode::Entropy { block },
         "digraph" => Mode::Digraph,
         other => return Err(bad(format!("unknown mode '{other}'"))),
