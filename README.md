@@ -19,6 +19,7 @@ bin2bmp [OPTIONS] [INPUT] [OUTPUT]
 | `bytes` | one per byte, value = brightness (0x00 black, 0xFF white) | the texture of the data |
 | `class` | one per byte: 0x00 black, 0xFF white, printable ASCII blue, everything else red | where text, padding and binary data sit |
 | `entropy` | one per block, brightness = Shannon entropy of the block | where the compressed or encrypted blobs are: they come out white, padding and repetition dark |
+| `digraph` | always 256×256: pixel (x, y) = how often byte x is followed by byte y, log scale | what kind of data it is; text, machine code and images each draw a recognisable shape |
 
 **Examples:**
 

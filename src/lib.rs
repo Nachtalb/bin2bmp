@@ -30,12 +30,16 @@ pub enum Mode {
     /// White is the most a block of that size can reach, so compressed or
     /// encrypted data is bright and padding or repetition is dark.
     Entropy { block: usize },
+    /// Always 256×256: pixel (x, y) is how often byte `x` is followed by
+    /// byte `y`, on a log scale. File formats have recognisable shapes.
+    Digraph,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Options {
     pub mode: Mode,
     /// Image width in pixels; `None` picks a near-square canvas.
+    /// Ignored by [`Mode::Digraph`].
     pub width: Option<u32>,
 }
 
@@ -50,7 +54,7 @@ pub struct Image {
 impl Mode {
     pub fn palette(self) -> Palette {
         std::array::from_fn(|i| match (self, i as u8) {
-            (Mode::Bytes | Mode::Entropy { .. }, v) => [v; 3],
+            (Mode::Bytes | Mode::Entropy { .. } | Mode::Digraph, v) => [v; 3],
             (Mode::Class, 0x00) => [0; 3],
             (Mode::Class, 0xFF) => [255; 3],
             (Mode::Class, b'\t' | b'\n' | b'\r' | 0x20..=0x7E) => [55, 126, 184],
@@ -63,6 +67,7 @@ impl Mode {
         match self {
             Mode::Bytes | Mode::Class => len,
             Mode::Entropy { block } => len.div_ceil(block.max(1) as u64),
+            Mode::Digraph => 65536 * len.min(1),
         }
     }
 
@@ -139,6 +144,50 @@ fn invalid(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, msg.into())
 }
 
+struct Digraph {
+    counts: Vec<u64>,
+    prev: Option<u8>,
+}
+
+impl Digraph {
+    fn feed(&mut self, mut chunk: &[u8]) {
+        let mut prev = match (self.prev, chunk.split_first()) {
+            (Some(prev), _) => prev,
+            (None, Some((&first, rest))) => {
+                chunk = rest;
+                first
+            }
+            (None, None) => return,
+        };
+        for &b in chunk {
+            self.counts[(b as usize) << 8 | prev as usize] += 1;
+            prev = b;
+        }
+        self.prev = Some(prev);
+    }
+
+    fn pixels(&self) -> Vec<u8> {
+        let max = self.counts.iter().copied().max().unwrap_or(0).max(1);
+        let scale = 254.0 / (max as f64).ln_1p();
+        self.counts
+            .iter()
+            .map(|&c| {
+                if c == 0 {
+                    0
+                } else {
+                    1 + ((c as f64).ln_1p() * scale) as u8
+                }
+            })
+            .collect()
+    }
+}
+
+enum State {
+    PerByte,
+    Entropy(Box<Entropy>),
+    Digraph(Digraph),
+}
+
 /// Feeds the pixel values for `input` to `sink` in order, chunk by chunk.
 pub fn pixels(
     mode: Mode,
@@ -147,10 +196,15 @@ pub fn pixels(
 ) -> io::Result<()> {
     mode.check()?;
     let mut buf = vec![0u8; 1 << 18];
-    let mut entropy = match mode {
-        Mode::Entropy { block } => Some(Entropy::new(block)),
-        _ => None,
+    let mut state = match mode {
+        Mode::Bytes | Mode::Class => State::PerByte,
+        Mode::Entropy { block } => State::Entropy(Box::new(Entropy::new(block))),
+        Mode::Digraph => State::Digraph(Digraph {
+            counts: vec![0; 65536],
+            prev: None,
+        }),
     };
+    let mut any = false;
     loop {
         let n = match input.read(&mut buf) {
             Ok(0) => break,
@@ -158,27 +212,35 @@ pub fn pixels(
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(e),
         };
-        match &mut entropy {
-            None => sink(&buf[..n])?,
-            Some(e) => {
+        any = true;
+        match &mut state {
+            State::PerByte => sink(&buf[..n])?,
+            State::Entropy(e) => {
                 e.feed(&buf[..n]);
                 sink(&e.out)?;
                 e.out.clear();
             }
+            State::Digraph(d) => d.feed(&buf[..n]),
         }
     }
-    if let Some(mut e) = entropy {
-        e.emit();
-        sink(&e.out)?;
+    match state {
+        State::PerByte => Ok(()),
+        State::Entropy(mut e) => {
+            e.emit();
+            sink(&e.out)
+        }
+        State::Digraph(d) if any => sink(&d.pixels()),
+        State::Digraph(_) => Ok(()),
     }
-    Ok(())
 }
 
-fn dims(count: u64, width: Option<u32>) -> io::Result<(u32, u32)> {
+fn dims(opts: &Options, len: u64) -> io::Result<(u32, u32)> {
+    let count = opts.mode.pixel_count(len);
     if count == 0 {
         return Err(invalid("no input data"));
     }
-    let width = match width {
+    let width = match opts.width {
+        _ if opts.mode == Mode::Digraph => 256,
         Some(0) => return Err(invalid("width must be at least 1")),
         Some(w) => w as u64,
         None => {
@@ -296,8 +358,7 @@ impl Image {
 /// Renders `data` into an in-memory image.
 pub fn render(data: &[u8], opts: &Options) -> io::Result<Image> {
     opts.mode.check()?;
-    let count = opts.mode.pixel_count(data.len() as u64);
-    let (width, height) = dims(count, opts.width)?;
+    let (width, height) = dims(opts, data.len() as u64)?;
     let mut px = Vec::with_capacity(width as usize * height as usize);
     pixels(opts.mode, data, |v| {
         px.extend_from_slice(v);
@@ -321,7 +382,7 @@ pub fn write_bmp(
     opts: &Options,
 ) -> io::Result<(u32, u32)> {
     opts.mode.check()?;
-    let (width, height) = dims(opts.mode.pixel_count(len), opts.width)?;
+    let (width, height) = dims(opts, len)?;
     let mut rows = RowWriter::new(out, width, height, &opts.mode.palette())?;
     pixels(opts.mode, input, |v| rows.push(v))?;
     rows.finish()?;
@@ -415,9 +476,29 @@ mod tests {
     }
 
     #[test]
+    fn digraph_plots_byte_pairs() {
+        let opts = Options {
+            mode: Mode::Digraph,
+            width: Some(3),
+        };
+        let image = render(&[1, 2, 1, 2, 1, 9], &opts).unwrap();
+        assert_eq!((image.width, image.height), (256, 256));
+        let at = |x: usize, y: usize| image.pixels[y * 256 + x];
+        // 1→2 twice (brightest), 2→1 twice, 1→9 once, nothing else
+        assert_eq!((at(1, 2), at(2, 1)), (255, 255));
+        assert!(at(1, 9) > 0 && at(1, 9) < 255);
+        assert_eq!(image.pixels.iter().filter(|&&p| p > 0).count(), 3);
+    }
+
+    #[test]
     fn refuses_what_bmp_cannot_hold() {
         let opts = Options::default();
         assert!(write_bmp(io::empty(), 0, io::sink(), &opts).is_err());
+        let digraph = Options {
+            mode: Mode::Digraph,
+            ..opts
+        };
+        assert!(write_bmp(io::empty(), 0, io::sink(), &digraph).is_err());
         assert!(write_bmp(io::empty(), 5 << 30, io::sink(), &opts).is_err());
         let opts = Options {
             mode: Mode::Entropy { block: 0 },

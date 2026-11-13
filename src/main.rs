@@ -20,6 +20,8 @@ Options:
                              printable ASCII blue, everything else red
                       entropy  one pixel per block, brightness = how random
                                the block is (compressed/encrypted = white)
+                      digraph  256x256 plot of which byte follows which;
+                               file formats have recognisable shapes
   -b, --block N     bytes per pixel in entropy mode (default: 256)
 
 The canvas is as square as possible.";
@@ -56,6 +58,7 @@ fn run(args: &[String]) -> io::Result<()> {
         "bytes" => Mode::Bytes,
         "class" => Mode::Class,
         "entropy" => Mode::Entropy { block },
+        "digraph" => Mode::Digraph,
         other => return Err(bad(format!("unknown mode '{other}'"))),
     };
     let mut paths = paths.into_iter();
