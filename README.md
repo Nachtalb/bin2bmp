@@ -66,6 +66,18 @@ write_bmp(file, len, std::io::stdout().lock(), &Options::default())?;
 
 `pixels()` gives the raw pixel stream chunk by chunk if you want to draw it yourself.
 
+## 3D viewer
+
+`viewer/index.html` is a standalone page for looking at files in 3D. It is separate from the Rust code: open it in a browser, then drop files on it (they stay on your machine). It needs an internet connection once, to load three.js from a CDN.
+
+- **Trigraph** — every three neighbouring bytes are one point in a cube. Text is a small clump, raw audio or pixels a rod along the diagonal, compressed or encrypted data fills the cube.
+- **Digraph + height** — the flat digraph with each pair raised by how often it occurs.
+- **Digraph over file** — the digraph stacked by position in the file, so the file's sections show up as layers.
+
+Points can be coloured by how often they occur or by where in the file they first occur. Each opened file is listed with its name, size and a preview: the picture itself for images the browser can decode, a byte map for everything else.
+
+`node viewer/test.js` checks the counting and placement logic.
+
 ## Output format
 
 8-bit indexed BMP with a 256-entry palette, rows stored top-down. One byte per pixel keeps the output roughly the same size as the input. BMP cannot hold more than 4 GB, so larger outputs are refused with an error; use `entropy` mode for inputs that big.
