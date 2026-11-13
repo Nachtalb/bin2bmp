@@ -13,6 +13,7 @@ bin2bmp [OPTIONS] [INPUT] [OUTPUT]
 
 - `-m, --mode MODE` — what a pixel shows (default: `bytes`)
 - `-b, --block N` — bytes per pixel in `entropy` mode (default: 256)
+- `-w, --width N` — image width in pixels (default: as square as possible); a width matching the data's record size lines columns up
 
 | Mode | Pixel | Shows |
 |------|-------|-------|

@@ -23,8 +23,8 @@ Options:
                       digraph  256x256 plot of which byte follows which;
                                file formats have recognisable shapes
   -b, --block N     bytes per pixel in entropy mode (default: 256)
-
-The canvas is as square as possible.";
+  -w, --width N     image width in pixels (default: as square as possible)
+";
 
 fn bad(msg: String) -> io::Error {
     io::Error::other(format!("{msg} (see --help)"))
@@ -49,6 +49,7 @@ fn run(args: &[String]) -> io::Result<()> {
         match arg {
             "-m" | "--mode" => mode = value()?,
             "-b" | "--block" => block = num(arg, value()?)?,
+            "-w" | "--width" => opts.width = Some(num(arg, value()?)?),
             "-" => paths.push(arg),
             _ if arg.starts_with('-') => return Err(bad(format!("unknown option '{arg}'"))),
             _ => paths.push(arg),
