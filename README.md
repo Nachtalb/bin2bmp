@@ -71,13 +71,24 @@ write_bmp(file, len, std::io::stdout().lock(), &Options::default())?;
 
 ## Viewer
 
-`viewer/index.html` is a standalone page for looking at files in 3D. Open it in a browser and drop files on it; they stay on your machine. It loads [three.js](https://threejs.org) and [lil-gui](https://lil-gui.georgealways.com) from a CDN, so it needs a connection the first time.
+`viewer/index.html` is a standalone page for looking at files in 3D, and in 2D through this library compiled to wasm. Open it in a browser and drop files on it; they stay on your machine. It loads [three.js](https://threejs.org) and [lil-gui](https://lil-gui.georgealways.com) from a CDN, so it needs a connection the first time.
 
 - **Trigraph** — every three neighbouring bytes are one point in a cube. Text is a small clump, raw audio or pixels a rod along the diagonal, compressed or encrypted data fills the cube.
 - **Digraph** — the flat digraph with each pair raised by how often it occurs.
 - **Digraph over file** — the digraph stacked by position in the file, so the file's sections show up as layers.
 
 The panel narrows the graph to a window of the file, samples every n-th byte, filters by count, and switches colouring between count and file offset. Each opened file is listed with its name, size and a preview: the picture itself for images the browser can decode, a byte map for everything else.
+
+**2D maps** are the CLI's modes (`bytes`, `class`, `bit`, `entropy`, `chi`, `digraph`, rows or Hilbert layout), rendered in the page by the library itself. For that the page needs the wasm module next to it and has to be served over http, because browsers do not load wasm from `file://`:
+
+```sh
+rustup target add wasm32-unknown-unknown
+cargo build --release -p bin2bmp-wasm --target wasm32-unknown-unknown
+cp target/wasm32-unknown-unknown/release/bin2bmp_wasm.wasm viewer/bin2bmp.wasm
+python3 -m http.server -d viewer        # then open http://localhost:8000
+```
+
+The module is the `wasm/` crate: three small C-style exports around `render`, no bindings generator, about 40 KB. The 3D graphs work without it, straight from the file.
 
 `node viewer/test.js` checks the counting and placement logic.
 

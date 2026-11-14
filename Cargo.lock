@@ -5,3 +5,10 @@ version = 4
 [[package]]
 name = "bin2bmp"
 version = "0.2.0"
+
+[[package]]
+name = "bin2bmp-wasm"
+version = "0.1.0"
+dependencies = [
+ "bin2bmp",
+]

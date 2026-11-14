@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>3D byte graphs</title>
+<title>bin2bmp viewer</title>
 <style>
   html, body { margin: 0; height: 100%; background: #0b0b0e; color: #ddd; font: 12px/1.4 ui-monospace, monospace; overflow: hidden; }
   #info { position: absolute; top: 10px; left: 10px; background: rgba(20,20,26,.8); border: 1px solid #333; border-radius: 6px; padding: 8px 10px; white-space: pre; pointer-events: none; }
@@ -16,11 +16,13 @@
   .file .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .file .sub { color: #888; }
   .file button { padding: 0 6px; border: 0; background: none; color: #888; font: inherit; font-size: 16px; cursor: pointer; }
+  #map { position: absolute; top: 0; left: 0; transform-origin: 0 0; image-rendering: pixelated; display: none; cursor: grab; }
   #drop { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; font-size: 22px; background: rgba(43,92,255,.2); border: 3px dashed #2b5cff; pointer-events: none; }
   .lil-gui.root { --width: 290px; }
 </style>
 </head>
 <body>
+<canvas id="map"></canvas>
 <div id="info"></div>
 <div id="files"></div>
 <div id="axes"></div>
@@ -31,6 +33,15 @@
 // No DOM in this block: viewer/test.js runs it in node.
 const MODES = ["Trigraph", "Digraph", "Digraph over file"];
 const SLICES = 256;
+// The bin2bmp modes of the 2D view, in the order the wasm module numbers them.
+const MAPS = [
+  { name: "bytes", about: "one pixel per byte, value = brightness" },
+  { name: "class", about: "one pixel per byte: 0x00 black, 0xFF white, printable text blue, everything else red" },
+  { name: "bit", about: "one pixel per byte: white if the chosen bit is set; data hidden in the low bits looks like even static", param: "bit" },
+  { name: "entropy", about: "one pixel per block, brighter = more random; compressed and encrypted data is white", param: "block" },
+  { name: "chi", about: "one pixel per block: white where the lowest bits look overwritten; only meaningful on raw pixels or audio", param: "block" },
+  { name: "digraph", about: "256×256: pixel (x, y) is how often byte x is followed by byte y" },
+];
 
 // fixed-seed PRNG so live updates don't shimmer between rebuilds
 const prng = (a = 0x9E3779B9) => () => {  // mulberry32
@@ -97,11 +108,17 @@ function byteMap(bytes, size) {
   return px;
 }
 
+// Per-byte maps of big files would not fit a canvas: keep every stride-th byte so at most maxPixels remain.
+function thin(bytes, maxPixels) {
+  const stride = Math.max(1, Math.ceil(bytes.length / maxPixels));
+  return { stride, data: stride === 1 ? bytes : bytes.filter((_, i) => i % stride === 0) };
+}
+
 function human(n) {
   for (const unit of ["B", "KB", "MB"]) { if (n < 1024 || unit === "MB") return (unit === "B" ? n : n.toFixed(1)) + " " + unit; n /= 1024; }
 }
 
-if (typeof module !== "undefined") module.exports = { MODES, prng, tables, count, select, place, byteMap, human };
+if (typeof module !== "undefined") module.exports = { MODES, MAPS, prng, tables, count, select, place, thin, byteMap, human };
 </script>
 
 <script type="importmap">
@@ -116,12 +133,14 @@ import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import GUI from "lil-gui";
 
-const PREVIEW_SAMPLES = 0.5e6, THUMB = 96;
+const PREVIEW_SAMPLES = 0.5e6, THUMB = 96, MAX_MAP_PIXELS = 4096 * 4096;
 const $ = id => document.getElementById(id);
 const T = tables();
 
 const P = {
   open: () => $("file").click(),
+  view: "3D graph",
+  map: MAPS[0].name, layout: "rows", block: 256, bit: 0,
   mode: MODES[0],
   start: 0, length: 100, step: 1, phase: 0, maxSamples: 4,
   minCount: 1, maxCount: 0,
@@ -180,9 +199,65 @@ function applyLook() {
   controls.autoRotate = P.rotate;
 }
 
+// ---------- 2D map (the Rust library, compiled to wasm) ----------
+const map = $("map"), mapView = { zoom: 1, x: 0, y: 0 };
+let wasm;
+try {
+  wasm = (await WebAssembly.instantiate(await (await fetch("bin2bmp.wasm")).arrayBuffer())).instance.exports;
+} catch { /* reported when the 2D view is opened */ }
+
+function placeMap() {
+  const scale = Math.min(innerWidth / map.width, innerHeight / map.height) * 0.9 * mapView.zoom;
+  const x = innerWidth / 2 + mapView.x - map.width * scale / 2, y = innerHeight / 2 + mapView.y - map.height * scale / 2;
+  map.style.transform = `translate(${x}px, ${y}px) scale(${scale})`;
+}
+
+function buildMap() {
+  const t0 = performance.now(), mode = MAPS.findIndex(m => m.name === P.map), { about, param } = MAPS[mode];
+  $("axes").textContent = `${about}   ·   scroll = zoom, drag = move, double-click = reset`;
+  map.width = map.height = 1;
+  if (!wasm) { $("info").textContent = "2D maps need bin2bmp.wasm next to this page,\nserved over http. See the README."; return; }
+  // only the per-byte maps grow with the file; block maps and the digraph stay small
+  const { data, stride } = thin(current.bytes, param === "block" || P.map === "digraph" ? Infinity : MAX_MAP_PIXELS);
+  const input = wasm.b2b_alloc(data.length);
+  new Uint8Array(wasm.memory.buffer, input, data.length).set(data);
+  const out = wasm.b2b_render(input, data.length, mode, param ? P[param] : 0, P.layout === "hilbert" && P.map !== "digraph");
+  wasm.b2b_free(input, data.length);
+  if (!out) { $("info").textContent = `${current.name}\ncannot be shown as a ${P.map} map`; return; }
+  const header = new DataView(wasm.memory.buffer, out, 8), width = header.getUint32(0, true), height = header.getUint32(4, true);
+  const rgba = new Uint8ClampedArray(wasm.memory.buffer, out + 8, width * height * 4).slice();
+  wasm.b2b_free(out, 8 + rgba.length);
+  map.width = width; map.height = height;
+  map.getContext("2d").putImageData(new ImageData(rgba, width, height), 0, 0);
+  placeMap();
+  $("info").textContent =
+    `${current.name}  (${current.bytes.length.toLocaleString()} B)\n` +
+    `map      ${P.map}${param ? ` (${param} ${P[param]})` : ""}, ${P.map === "digraph" ? "fixed layout" : P.layout}\n` +
+    `size     ${width} × ${height} px` + (stride > 1 ? `   (large file: 1 byte in ${stride})` : "") + `\n` +
+    `time     ${(performance.now() - t0).toFixed(0)} ms`;
+}
+
+addEventListener("wheel", e => {
+  if (e.target !== map && e.target !== document.body) return;
+  const factor = Math.exp(-e.deltaY / 300), cx = e.clientX - innerWidth / 2, cy = e.clientY - innerHeight / 2;
+  mapView.x = cx - (cx - mapView.x) * factor; mapView.y = cy - (cy - mapView.y) * factor;  // keep the spot under the pointer still
+  mapView.zoom *= factor; placeMap();
+}, { passive: true });
+map.addEventListener("pointerdown", e => {
+  const sx = e.clientX - mapView.x, sy = e.clientY - mapView.y;
+  map.setPointerCapture(e.pointerId);
+  const move = m => { mapView.x = m.clientX - sx; mapView.y = m.clientY - sy; placeMap(); };
+  const up = () => { map.removeEventListener("pointermove", move); map.removeEventListener("pointerup", up); };
+  map.addEventListener("pointermove", move); map.addEventListener("pointerup", up);
+});
+map.addEventListener("dblclick", () => { mapView.zoom = 1; mapView.x = mapView.y = 0; placeMap(); });
+
 // ---------- graph ----------
 function build(preview = false) {
   document.querySelectorAll(".file").forEach(card => card.classList.toggle("on", card.file === current));
+  const flat = P.view !== "3D graph";
+  renderer.domElement.style.display = flat ? "none" : ""; map.style.display = flat && current ? "block" : "none";
+  if (flat && current) return buildMap();
   if (points) { scene.remove(points); points.geometry.dispose(); points = null; }
   if (!current) { $("info").textContent = "Open or drop a file."; $("axes").textContent = ""; return; }
   const t0 = performance.now(), { bytes, name } = current;
@@ -228,10 +303,19 @@ function schedule(preview) {
 const live = c => c.onChange(() => schedule(true)).onFinishChange(() => schedule(false));
 
 // ---------- gui ----------
-const gui = new GUI({ title: "3D byte graphs" });
+const gui = new GUI({ title: "bin2bmp viewer" });
 const fData = gui.addFolder("Data");
 fData.add(P, "open").name("Open files…");
-fData.add(P, "mode", MODES).onChange(() => schedule(false));
+fData.add(P, "view", ["3D graph", "2D map"]).onChange(showFolders);
+const modeCtl = fData.add(P, "mode", MODES).onChange(() => schedule(false));
+
+const fMap = gui.addFolder("2D map");
+fMap.add(P, "map", MAPS.map(m => m.name)).name("mode").onChange(showFolders);
+const mapParams = {
+  layout: fMap.add(P, "layout", ["rows", "hilbert"]).onChange(() => schedule(false)),
+  block: fMap.add(P, "block", [16, 64, 256, 1024, 4096, 16384]).name("bytes per pixel").onChange(() => schedule(false)),
+  bit: fMap.add(P, "bit", 0, 7, 1).name("bit (0 = lowest)").onChange(() => schedule(false)),
+};
 
 const fWin = gui.addFolder("Window & sampling");
 live(fWin.add(P, "start", 0, 100, 0.1).name("start %"));
@@ -258,6 +342,17 @@ fCam.add(P, "rotate").name("auto-rotate").onChange(applyLook);
 fCam.add(P, "speed", 0, 5, 0.1).name("rotate speed").onChange(applyLook);
 fCam.add(P, "projection", ["perspective", "isometric"]).onChange(setProjection);
 fCam.add({ reset: () => { pan.x = pan.y = 0; setProjection(); } }, "reset").name("Reset view");
+
+// Each view only shows the controls that affect it.
+function showFolders() {
+  const flat = P.view !== "3D graph", param = MAPS.find(m => m.name === P.map).param;
+  modeCtl.show(!flat); fMap.show(flat);
+  for (const folder of [fWin, fFilt, fLook, fCam]) folder.show(!flat);
+  mapParams.layout.show(P.map !== "digraph"); mapParams.block.show(param === "block"); mapParams.bit.show(param === "bit");
+  mapView.zoom = 1; mapView.x = mapView.y = 0;
+  schedule(false);
+}
+showFolders();
 
 // ---------- files ----------
 // Card with a preview: the picture itself if the browser can decode it, otherwise a byte map.
@@ -304,11 +399,14 @@ addEventListener("drop", e => { e.preventDefault(); $("drop").style.display = "n
 function resize() {
   renderer.setSize(innerWidth, innerHeight);
   const a = innerWidth / innerHeight; persp.aspect = a; ortho.left = -a; ortho.right = a;
-  applyPan();
+  applyPan(); placeMap();
 }
 addEventListener("resize", resize); resize(); setProjection();
 applyLook();
-(function loop() { controls.update(); renderer.render(scene, camera); requestAnimationFrame(loop); })();
+(function loop() {
+  if (P.view === "3D graph") { controls.update(); renderer.render(scene, camera); }  // nothing to draw behind a 2D map
+  requestAnimationFrame(loop);
+})();
 
 // Built-in samples so there is something to look at before a file is opened.
 const noise = new Uint8Array(200_000);

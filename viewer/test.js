@@ -4,7 +4,7 @@ const html = require("node:fs").readFileSync(__dirname + "/index.html", "utf8");
 const pure = html.match(/<script id="pure">([\s\S]*?)<\/script>/)[1];
 const module_ = {};
 new Function("module", pure)(module_);
-const { MODES, tables, count, select, place, byteMap, human } = module_.exports;
+const { MODES, MAPS, tables, count, select, place, thin, byteMap, human } = module_.exports;
 
 const T = tables();
 const whole = { start: 0, length: 100, step: 1, phase: 0 };
@@ -53,6 +53,14 @@ assert.deepStrictEqual(counted(), once);
 // too short for a single pair or triple
 assert.strictEqual(count(Uint8Array.of(1, 2), { ...whole, mode: "Trigraph" }, T, 100).n, 0);
 assert.strictEqual(count(new Uint8Array(0), { ...whole, mode: "Digraph" }, T, 100).n, 0);
+
+// thinning for the 2D view: small inputs pass through untouched, big ones keep every stride-th byte
+const small = Uint8Array.of(1, 2, 3);
+assert.strictEqual(thin(small, 3).data, small);
+assert.deepStrictEqual(thin(Uint8Array.of(0, 1, 2, 3, 4, 5, 6), 3), { stride: 3, data: Uint8Array.of(0, 3, 6) });
+assert.strictEqual(thin(small, Infinity).stride, 1);
+// the wasm module numbers the modes in this order
+assert.deepStrictEqual(MAPS.map(m => m.name), ["bytes", "class", "bit", "entropy", "chi", "digraph"]);
 
 // thumbnail: 4 bytes on a 2×2 canvas, opaque grey
 assert.deepStrictEqual([...byteMap(Uint8Array.of(0, 255, 128, 7), 2)], [0, 0, 0, 255, 255, 255, 255, 255, 128, 128, 128, 255, 7, 7, 7, 255]);

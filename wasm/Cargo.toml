@@ -1,0 +1,11 @@
+[package]
+name = "bin2bmp-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "bin2bmp for the browser, as a plain wasm module without a bindings generator"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+bin2bmp = { path = ".." }
