@@ -233,12 +233,13 @@ controls.addEventListener("end", () => { snapView(); idle = setTimeout(() => con
 
 const box = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1)), new THREE.LineBasicMaterial({ color: 0x444455 }));
 scene.add(box);
-const mat = new THREE.PointsMaterial({ vertexColors: true, sizeAttenuation: false, transparent: true, depthWrite: false });
+const mat = new THREE.PointsMaterial({ vertexColors: true, sizeAttenuation: false, transparent: true });
 let points;
 
 function applyLook() {
   mat.size = P.size; mat.opacity = P.opacity;
   mat.blending = P.additive ? THREE.AdditiveBlending : THREE.NormalBlending; mat.needsUpdate = true;
+  mat.depthWrite = !P.additive;  // nearer points cover farther ones; additive light adds up in any order
   controls.autoRotateSpeed = P.speed; box.visible = P.box;
   controls.autoRotate = P.rotate;
 }
