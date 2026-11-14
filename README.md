@@ -71,6 +71,8 @@ write_bmp(file, len, std::io::stdout().lock(), &Options::default())?;
 
 ## Viewer
 
+Live at <https://bin2bmp.pages.dev>, redeployed on every push to `master`.
+
 `viewer/index.html` is a standalone page for looking at files in 3D, and in 2D through this library compiled to wasm. Open it in a browser and drop files on it; they stay on your machine. It loads [three.js](https://threejs.org) and [lil-gui](https://lil-gui.georgealways.com) from a CDN, so it needs a connection the first time.
 
 - **Trigraph** — every three neighbouring bytes are one point in a cube. Text is a small clump, raw audio or pixels a rod along the diagonal, compressed or encrypted data fills the cube.
