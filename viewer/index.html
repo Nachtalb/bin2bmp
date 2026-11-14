@@ -7,8 +7,9 @@
 <style>
   html, body { margin: 0; height: 100%; background: #0b0b0e; color: #ddd; font: 12px/1.4 ui-monospace, monospace; overflow: hidden; }
   #info { position: absolute; top: 10px; left: 10px; background: rgba(20,20,26,.8); border: 1px solid #333; border-radius: 6px; padding: 8px 10px; white-space: pre; pointer-events: none; }
-  #axes { position: absolute; bottom: 10px; left: 10px; color: #888; }
-  #files { position: absolute; left: 10px; bottom: 36px; width: 250px; max-height: 50%; overflow-y: auto; }
+  #bottom { position: absolute; left: 10px; right: 10px; bottom: 10px; pointer-events: none; }
+  #axes { margin-top: 6px; color: #888; }
+  #files { width: 250px; max-height: 50vh; overflow-y: auto; pointer-events: auto; }
   .file { display: flex; gap: 8px; align-items: center; padding: 5px; margin-top: 4px; background: rgba(20,20,26,.8); border: 1px solid #333; border-radius: 6px; cursor: pointer; }
   .file.on { border-color: #2b5cff; background: rgba(43,92,255,.2); }
   .file canvas { width: 48px; height: 48px; flex: none; background: #000; border-radius: 3px; image-rendering: pixelated; }
@@ -16,16 +17,21 @@
   .file .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .file .sub { color: #888; }
   .file button { padding: 0 6px; border: 0; background: none; color: #888; font: inherit; font-size: 16px; cursor: pointer; }
-  #map { position: absolute; top: 0; left: 0; transform-origin: 0 0; image-rendering: pixelated; display: none; cursor: grab; }
+  /* fixed: a map wider than a phone's screen must not widen the page */
+  #map { position: fixed; top: 0; left: 0; transform-origin: 0 0; image-rendering: pixelated; display: none; cursor: grab; touch-action: none; }
   #drop { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; font-size: 22px; background: rgba(43,92,255,.2); border: 3px dashed #2b5cff; pointer-events: none; }
-  .lil-gui.root { --width: 290px; }
+  .lil-gui.root { --width: min(290px, calc(100vw - 30px)); }
+  @media (max-width: 700px) {  /* phones: info under the panel's title bar, files as a strip */
+    #info { top: 44px; font-size: 10px; white-space: pre-wrap; }
+    #files { display: flex; gap: 4px; width: auto; overflow-x: auto; }
+    .file { flex: none; width: 190px; }
+  }
 </style>
 </head>
 <body>
 <canvas id="map"></canvas>
 <div id="info"></div>
-<div id="files"></div>
-<div id="axes"></div>
+<div id="bottom"><div id="files"></div><div id="axes"></div></div>
 <div id="drop">Drop files to graph them</div>
 <input type="file" id="file" multiple hidden>
 
@@ -253,13 +259,19 @@ function zoomMap(factor, px, py) {
 addEventListener("wheel", e => {
   if (e.target === map || e.target === document.body) zoomMap(Math.exp(-e.deltaY / 300), e.clientX, e.clientY);
 }, { passive: true });
-map.addEventListener("pointerdown", e => {
-  const sx = e.clientX - mapView.x, sy = e.clientY - mapView.y;
-  map.setPointerCapture(e.pointerId);
-  const move = m => { mapView.x = m.clientX - sx; mapView.y = m.clientY - sy; placeMap(); };
-  const up = () => { map.removeEventListener("pointermove", move); map.removeEventListener("pointerup", up); };
-  map.addEventListener("pointermove", move); map.addEventListener("pointerup", up);
+// one pointer drags; with two down, each move zooms about the other finger (pinch)
+const held = new Map();
+map.addEventListener("pointerdown", e => { map.setPointerCapture(e.pointerId); held.set(e.pointerId, e); });
+map.addEventListener("pointermove", e => {
+  const was = held.get(e.pointerId);
+  if (!was) return;
+  const other = [...held.values()].find(p => p.pointerId !== e.pointerId);
+  const reach = p => Math.hypot(p.clientX - other.clientX, p.clientY - other.clientY) || 1;
+  if (other) zoomMap(reach(e) / reach(was), other.clientX, other.clientY);
+  else { mapView.x += e.clientX - was.clientX; mapView.y += e.clientY - was.clientY; placeMap(); }
+  held.set(e.pointerId, e);
 });
+for (const end of ["pointerup", "pointercancel"]) map.addEventListener(end, e => held.delete(e.pointerId));
 map.addEventListener("dblclick", () => { mapView.zoom = 1; mapView.x = mapView.y = 0; placeMap(); });
 
 // ---------- graph ----------
@@ -356,6 +368,8 @@ fCam.add({ reset: () => { pan.x = pan.y = 0; setProjection(); } }, "reset").name
 const fExp = gui.addFolder("Export");
 fExp.add(P, "exportScale", [1, 2, 3, 4]).name("scale ×");
 fExp.add(P, "save").name("Save PNG");
+
+if (innerWidth < 700) gui.close();  // on a phone the open panel would cover the graph
 
 // Each view only shows the controls that affect it.
 function showFolders() {

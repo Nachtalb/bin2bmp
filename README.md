@@ -92,6 +92,8 @@ The module is the `wasm/` crate: three small C-style exports around `render`, no
 
 **Save PNG** exports the current view: the 3D graph re-rendered at 2× its on-screen resolution (1× to 4×), a 2D map with every pixel enlarged by the same factor.
 
+The page also works on a phone: one finger turns the graph or moves the map, two fingers zoom.
+
 `node viewer/test.js` checks the counting and placement logic.
 
 ## Output format
