@@ -310,6 +310,7 @@ map.addEventListener("dblclick", () => { mapView.zoom = 1; mapView.x = mapView.y
 // ---------- graph ----------
 function build(preview = false) {
   document.querySelectorAll(".file").forEach(card => card.classList.toggle("on", card.file === current));
+  document.querySelector(".file.on")?.scrollIntoView({ block: "nearest", inline: "nearest" });
   const flat = P.view !== "3D graph";
   renderer.domElement.style.display = flat ? "none" : ""; map.style.display = flat && current ? "block" : "none";
   if (flat && current) return buildMap();
