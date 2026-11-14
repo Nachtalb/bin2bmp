@@ -233,9 +233,10 @@ function applyLook() {
 // ---------- 2D map (the Rust library, compiled to wasm) ----------
 const map = $("map"), mapView = { zoom: 1, x: 0, y: 0 };
 let wasm;
-try {
-  wasm = (await WebAssembly.instantiate(await (await fetch("bin2bmp.wasm")).arrayBuffer())).instance.exports;
-} catch { /* reported when the 2D view is opened */ }
+// next to the page, or the hosted copy when the page is a lone file opened from disk
+for (const url of ["bin2bmp.wasm", "https://bin2bmp.pages.dev/bin2bmp.wasm"]) {
+  try { wasm = (await WebAssembly.instantiate(await (await fetch(url)).arrayBuffer())).instance.exports; break; } catch { /* reported when the 2D view is opened */ }
+}
 
 function placeMap() {
   const scale = Math.min(innerWidth / map.width, innerHeight / map.height) * 0.9 * mapView.zoom;
@@ -247,7 +248,7 @@ function buildMap() {
   const t0 = performance.now(), mode = MAPS.findIndex(m => m.name === P.map), { about, param } = MAPS[mode];
   $("axes").textContent = `${about}   ·   scroll = zoom, drag = move, double-click = reset`;
   map.width = map.height = 1;
-  if (!wasm) { $("info").textContent = "2D maps need bin2bmp.wasm next to this page,\nserved over http. See the README."; return; }
+  if (!wasm) { $("info").textContent = "2D maps need bin2bmp.wasm: next to this page,\nor a connection to fetch it from bin2bmp.pages.dev."; return; }
   // only the per-byte maps grow with the file; block maps and the digraph stay small
   const { data, stride } = thin(current.bytes, param === "block" || P.map === "digraph" ? Infinity : MAX_MAP_PIXELS);
   const input = wasm.b2b_alloc(data.length);

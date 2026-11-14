@@ -81,7 +81,7 @@ Live at <https://bin2bmp.pages.dev>, redeployed on every push to `master`.
 
 The panel narrows the graph to a window of the file, samples every n-th byte, filters by count, and switches colouring between count and file offset. Each opened file is listed with its name, size and a preview: the picture itself for images the browser can decode, a byte map for everything else.
 
-**2D maps** are the CLI's modes (`bytes`, `class`, `bit`, `entropy`, `chi`, `digraph`, rows or Hilbert layout), rendered in the page by the library itself. For that the page needs the wasm module next to it and has to be served over http, because browsers do not load wasm from `file://`:
+**2D maps** are the CLI's modes (`bytes`, `class`, `bit`, `entropy`, `chi`, `digraph`, rows or Hilbert layout), rendered in the page by the library itself. The page loads the wasm module from its own folder. A lone copy of the page opened from disk fetches it from the hosted site instead, so it needs a connection. To build and serve it yourself:
 
 ```sh
 rustup target add wasm32-unknown-unknown
