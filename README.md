@@ -96,6 +96,8 @@ The module is the `wasm/` crate: three small C-style exports around `render`, no
 
 For exact screenshots, "snap on release" in the Camera folder glides the view to the nearest 15°, 45° or 90° when you let go, and the current angle is shown bottom left.
 
+With "images as BMP" switched on, an opened JPEG, PNG or other picture is decoded and graphed as an uncompressed BMP, so its pixels show instead of compressed noise.
+
 The panel can be made see-through with "panel opacity", so the graph stays visible behind it while you change things. The page also works on a phone: one finger turns the graph or moves the map, two fingers zoom.
 
 `node viewer/test.js` checks the counting and placement logic.

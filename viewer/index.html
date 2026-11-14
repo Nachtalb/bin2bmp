@@ -130,11 +130,24 @@ function snapAngle(angle, step, extras = []) {
   return [Math.round(angle / step) * step, ...extras].reduce((best, a) => Math.abs(a - angle) < Math.abs(best - angle) ? a : best);
 }
 
+// A decoded picture as the bytes of an uncompressed 24-bit BMP file: rows bottom-up, padded to 4 bytes, alpha dropped.
+function toBmp(rgba, width, height) {
+  const row = (width * 3 + 3) & ~3, out = new Uint8Array(54 + row * height), head = new DataView(out.buffer);
+  out.set([0x42, 0x4D]); head.setUint32(2, out.length, true); head.setUint32(10, 54, true);
+  head.setUint32(14, 40, true); head.setInt32(18, width, true); head.setInt32(22, height, true);
+  head.setUint16(26, 1, true); head.setUint16(28, 24, true); head.setUint32(34, row * height, true);
+  for (let y = 0; y < height; y++) {
+    let o = 54 + (height - 1 - y) * row, i = y * width * 4;
+    for (let x = 0; x < width; x++, i += 4) { out[o++] = rgba[i + 2]; out[o++] = rgba[i + 1]; out[o++] = rgba[i]; }
+  }
+  return out;
+}
+
 function human(n) {
   for (const unit of ["B", "KB", "MB"]) { if (n < 1024 || unit === "MB") return (unit === "B" ? n : n.toFixed(1)) + " " + unit; n /= 1024; }
 }
 
-if (typeof module !== "undefined") module.exports = { MODES, MAPS, prng, tables, count, select, place, thin, exportFactor, snapAngle, byteMap, human };
+if (typeof module !== "undefined") module.exports = { MODES, MAPS, prng, tables, count, select, place, thin, exportFactor, snapAngle, toBmp, byteMap, human };
 </script>
 
 <script type="importmap">
@@ -155,7 +168,7 @@ const T = tables();
 
 const P = {
   open: () => $("file").click(),
-  view: "3D graph",
+  view: "3D graph", asBmp: false,
   map: MAPS[0].name, layout: "rows", block: 256, bit: 0,
   mode: MODES[0],
   start: 0, length: 100, step: 1, phase: 0, maxSamples: 4,
@@ -259,17 +272,18 @@ function placeMap() {
 }
 
 function buildMap() {
+  const { bytes, name } = shown();
   const t0 = performance.now(), mode = MAPS.findIndex(m => m.name === P.map), { about, param } = MAPS[mode];
   $("axes").textContent = `${about}   ·   scroll = zoom, drag = move, double-click = reset`;
   map.width = map.height = 1;
   if (!wasm) { $("info").textContent = "2D maps need bin2bmp.wasm: next to this page,\nor a connection to fetch it from bin2bmp.pages.dev."; return; }
   // only the per-byte maps grow with the file; block maps and the digraph stay small
-  const { data, stride } = thin(current.bytes, param === "block" || P.map === "digraph" ? Infinity : MAX_MAP_PIXELS);
+  const { data, stride } = thin(bytes, param === "block" || P.map === "digraph" ? Infinity : MAX_MAP_PIXELS);
   const input = wasm.b2b_alloc(data.length);
   new Uint8Array(wasm.memory.buffer, input, data.length).set(data);
   const out = wasm.b2b_render(input, data.length, mode, param ? P[param] : 0, P.layout === "hilbert" && P.map !== "digraph");
   wasm.b2b_free(input, data.length);
-  if (!out) { $("info").textContent = `${current.name}\ncannot be shown as a ${P.map} map`; return; }
+  if (!out) { $("info").textContent = `${name}\ncannot be shown as a ${P.map} map`; return; }
   const header = new DataView(wasm.memory.buffer, out, 8), width = header.getUint32(0, true), height = header.getUint32(4, true);
   const rgba = new Uint8ClampedArray(wasm.memory.buffer, out + 8, width * height * 4).slice();
   wasm.b2b_free(out, 8 + rgba.length);
@@ -277,7 +291,7 @@ function buildMap() {
   map.getContext("2d").putImageData(new ImageData(rgba, width, height), 0, 0);
   placeMap();
   $("info").textContent =
-    `${current.name}  (${current.bytes.length.toLocaleString()} B)\n` +
+    `${name}  (${bytes.length.toLocaleString()} B)\n` +
     `map      ${P.map}${param ? ` (${param} ${P[param]})` : ""}, ${P.map === "digraph" ? "fixed layout" : P.layout}\n` +
     `size     ${width} × ${height} px` + (stride > 1 ? `   (large file: 1 byte in ${stride})` : "") + `\n` +
     `time     ${(performance.now() - t0).toFixed(0)} ms`;
@@ -307,6 +321,21 @@ map.addEventListener("pointermove", e => {
 for (const end of ["pointerup", "pointercancel"]) map.addEventListener(end, e => held.delete(e.pointerId));
 map.addEventListener("dblclick", () => { mapView.zoom = 1; mapView.x = mapView.y = 0; placeMap(); });
 
+// What gets graphed: the current file, or its picture re-encoded as BMP when "images as BMP" is on.
+// Compressed formats (JPEG, PNG, ...) are noise as bytes; as BMP the pixels themselves show.
+function shown() {
+  const file = current;
+  if (!P.asBmp || !file.picture) return file;
+  if (!file.bmp) {
+    const canvas = document.createElement("canvas"), { width, height } = file.picture;
+    canvas.width = width; canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(file.picture, 0, 0);
+    file.bmp = { name: `${file.name} (as BMP)`, bytes: toBmp(ctx.getImageData(0, 0, width, height).data, width, height) };
+  }
+  return file.bmp;
+}
+
 // ---------- graph ----------
 function build(preview = false) {
   document.querySelectorAll(".file").forEach(card => card.classList.toggle("on", card.file === current));
@@ -316,7 +345,7 @@ function build(preview = false) {
   if (flat && current) return buildMap();
   if (points) { scene.remove(points); points.geometry.dispose(); points = null; }
   if (!current) { $("info").textContent = "Open or drop a file."; $("axes").textContent = ""; return; }
-  const t0 = performance.now(), { bytes, name } = current;
+  const t0 = performance.now(), { bytes, name } = shown();
   const cap = preview ? Math.min(PREVIEW_SAMPLES, P.maxSamples * 1e6) : P.maxSamples * 1e6;
   const { lo, hi, n, sampled } = count(bytes, P, T, cap);
   const { keep, unique, max } = select(T, P.minCount, P.maxCount, P.maxPoints * 1e3);
@@ -366,6 +395,7 @@ fade();
 const fData = gui.addFolder("Data");
 fData.add(P, "open").name("Open files…");
 fData.add(P, "view", ["3D graph", "2D map"]).onChange(showFolders);
+fData.add(P, "asBmp").name("images as BMP").onChange(() => schedule(false));
 const modeCtl = fData.add(P, "mode", MODES).onChange(() => schedule(false));
 
 const fMap = gui.addFolder("2D map");
@@ -444,7 +474,7 @@ function savePng() {
   source.toBlob(blob => {
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = `${current.name} ${flat ? P.map : P.mode}.png`.replace(/\s+/g, "-").toLowerCase();
+    a.download = `${shown().name} ${flat ? P.map : P.mode}.png`.replace(/\s+/g, "-").toLowerCase();
     a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 10000);  // phones start the download late
   });
   renderer.setPixelRatio(devicePixelRatio);
@@ -462,7 +492,7 @@ async function addFile(name, bytes) {
   meta.append(title, sub); card.append(canvas, meta, remove);
   const ctx = canvas.getContext("2d");
   try {
-    const picture = await createImageBitmap(new Blob([bytes]));
+    const picture = file.picture = await createImageBitmap(new Blob([bytes]));
     const scale = Math.min(THUMB / picture.width, THUMB / picture.height), w = picture.width * scale, h = picture.height * scale;
     canvas.style.imageRendering = "auto";
     ctx.drawImage(picture, (THUMB - w) / 2, (THUMB - h) / 2, w, h);

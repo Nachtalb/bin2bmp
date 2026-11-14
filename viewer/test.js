@@ -4,7 +4,7 @@ const html = require("node:fs").readFileSync(__dirname + "/index.html", "utf8");
 const pure = html.match(/<script id="pure">([\s\S]*?)<\/script>/)[1];
 const module_ = {};
 new Function("module", pure)(module_);
-const { MODES, MAPS, tables, count, select, place, thin, exportFactor, snapAngle, byteMap, human } = module_.exports;
+const { MODES, MAPS, tables, count, select, place, thin, exportFactor, snapAngle, toBmp, byteMap, human } = module_.exports;
 
 const T = tables();
 const whole = { start: 0, length: 100, step: 1, phase: 0 };
@@ -67,6 +67,12 @@ assert.deepStrictEqual([exportFactor(1280, 800, 2, 16384), exportFactor(1280, 80
 
 // view snapping: nearest step, unless an extra stop is closer
 assert.deepStrictEqual([snapAngle(50, 45), snapAngle(-70, 45), snapAngle(100, 90), snapAngle(30, 45, [35.26, -35.26]), snapAngle(10, 45, [35.26])], [45, -90, 90, 35.26, 0]);
+
+// BMP: 2×2 picture (red, green / blue, white) -> 54-byte header, bottom row first, BGR, rows padded to 4 bytes
+const bmp = toBmp(Uint8Array.of(255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 0), 2, 2);
+assert.deepStrictEqual([...bmp.subarray(0, 30)], [0x42, 0x4D, 70, 0, 0, 0, 0, 0, 0, 0, 54, 0, 0, 0, 40, 0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0, 1, 0, 24, 0]);
+assert.deepStrictEqual([...bmp.subarray(54)], [255, 0, 0, 255, 255, 255, 0, 0, 0, 0, 255, 0, 255, 0, 0, 0]);
+assert.strictEqual(toBmp(new Uint8Array(12), 3, 1).length, 54 + 12);
 
 // thumbnail: 4 bytes on a 2×2 canvas, opaque grey
 assert.deepStrictEqual([...byteMap(Uint8Array.of(0, 255, 128, 7), 2)], [0, 0, 0, 255, 255, 255, 255, 255, 128, 128, 128, 255, 7, 7, 7, 255]);
