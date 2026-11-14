@@ -90,6 +90,8 @@ python3 -m http.server -d viewer        # then open http://localhost:8000
 
 The module is the `wasm/` crate: three small C-style exports around `render`, no bindings generator, about 40 KB. The 3D graphs work without it, straight from the file.
 
+**Save PNG** exports the current view: the 3D graph re-rendered at 2× its on-screen resolution (1× to 4×), a 2D map with every pixel enlarged by the same factor.
+
 `node viewer/test.js` checks the counting and placement logic.
 
 ## Output format

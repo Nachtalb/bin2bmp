@@ -114,11 +114,16 @@ function thin(bytes, maxPixels) {
   return { stride, data: stride === 1 ? bytes : bytes.filter((_, i) => i % stride === 0) };
 }
 
+// Largest whole factor up to `scale` that keeps a w×h picture within maxSide per side.
+function exportFactor(w, h, scale, maxSide) {
+  return Math.max(1, Math.floor(Math.min(scale, maxSide / Math.max(w, h))));
+}
+
 function human(n) {
   for (const unit of ["B", "KB", "MB"]) { if (n < 1024 || unit === "MB") return (unit === "B" ? n : n.toFixed(1)) + " " + unit; n /= 1024; }
 }
 
-if (typeof module !== "undefined") module.exports = { MODES, MAPS, prng, tables, count, select, place, thin, byteMap, human };
+if (typeof module !== "undefined") module.exports = { MODES, MAPS, prng, tables, count, select, place, thin, exportFactor, byteMap, human };
 </script>
 
 <script type="importmap">
@@ -146,6 +151,7 @@ const P = {
   minCount: 1, maxCount: 0,
   colorBy: "count", scale: "log", size: 2, opacity: 0.7, additive: false, maxPoints: 400,
   rotate: true, speed: 0.8, box: true, projection: "perspective",
+  exportScale: 2, save: () => savePng(),
 };
 const files = [];
 let current;
@@ -155,6 +161,7 @@ const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(devicePixelRatio);
 document.body.prepend(renderer.domElement);
 const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0b0b0e);  // same as the page, so an exported PNG looks like the screen
 const persp = new THREE.PerspectiveCamera(50, 1, 0.01, 100);
 const ortho = new THREE.OrthographicCamera(-1, 1, 1, -1, -100, 100);  // frustum set in resize()
 let camera = persp;
@@ -237,11 +244,14 @@ function buildMap() {
     `time     ${(performance.now() - t0).toFixed(0)} ms`;
 }
 
-addEventListener("wheel", e => {
-  if (e.target !== map && e.target !== document.body) return;
-  const factor = Math.exp(-e.deltaY / 300), cx = e.clientX - innerWidth / 2, cy = e.clientY - innerHeight / 2;
-  mapView.x = cx - (cx - mapView.x) * factor; mapView.y = cy - (cy - mapView.y) * factor;  // keep the spot under the pointer still
+// Zooms by `factor` while the spot at (px, py) stays where it is.
+function zoomMap(factor, px, py) {
+  const cx = px - innerWidth / 2, cy = py - innerHeight / 2;
+  mapView.x = cx - (cx - mapView.x) * factor; mapView.y = cy - (cy - mapView.y) * factor;
   mapView.zoom *= factor; placeMap();
+}
+addEventListener("wheel", e => {
+  if (e.target === map || e.target === document.body) zoomMap(Math.exp(-e.deltaY / 300), e.clientX, e.clientY);
 }, { passive: true });
 map.addEventListener("pointerdown", e => {
   const sx = e.clientX - mapView.x, sy = e.clientY - mapView.y;
@@ -343,6 +353,10 @@ fCam.add(P, "speed", 0, 5, 0.1).name("rotate speed").onChange(applyLook);
 fCam.add(P, "projection", ["perspective", "isometric"]).onChange(setProjection);
 fCam.add({ reset: () => { pan.x = pan.y = 0; setProjection(); } }, "reset").name("Reset view");
 
+const fExp = gui.addFolder("Export");
+fExp.add(P, "exportScale", [1, 2, 3, 4]).name("scale ×");
+fExp.add(P, "save").name("Save PNG");
+
 // Each view only shows the controls that affect it.
 function showFolders() {
   const flat = P.view !== "3D graph", param = MAPS.find(m => m.name === P.map).param;
@@ -353,6 +367,34 @@ function showFolders() {
   schedule(false);
 }
 showFolders();
+
+// ---------- export ----------
+// Saves the current view as a PNG: the 3D graph re-rendered at exportScale times its on-screen pixels,
+// a 2D map with every pixel enlarged by it. The factor shrinks if the picture would get too big.
+function savePng() {
+  if (!current) return;
+  const flat = P.view !== "3D graph";
+  let source = renderer.domElement;
+  if (flat) {
+    const k = exportFactor(map.width, map.height, P.exportScale, 16384);
+    source = document.createElement("canvas"); source.width = map.width * k; source.height = map.height * k;
+    const ctx = source.getContext("2d");
+    ctx.imageSmoothingEnabled = false; ctx.drawImage(map, 0, 0, source.width, source.height);
+  } else {
+    const gl = renderer.getContext(), limit = Math.min(gl.getParameter(gl.MAX_RENDERBUFFER_SIZE), ...gl.getParameter(gl.MAX_VIEWPORT_DIMS));
+    const dpr = devicePixelRatio;
+    renderer.setPixelRatio(dpr * exportFactor(innerWidth * dpr, innerHeight * dpr, P.exportScale, limit));  // point size scales with it
+    renderer.render(scene, camera);
+  }
+  // toBlob copies the canvas right away, so the 3D canvas can go back to screen size below
+  source.toBlob(blob => {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `${current.name} ${flat ? P.map : P.mode}.png`.replace(/\s+/g, "-").toLowerCase();
+    a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 10000);  // phones start the download late
+  });
+  renderer.setPixelRatio(devicePixelRatio);
+}
 
 // ---------- files ----------
 // Card with a preview: the picture itself if the browser can decode it, otherwise a byte map.
