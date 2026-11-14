@@ -3,6 +3,9 @@ name = "bin2bmp"
 version = "0.2.0"
 edition = "2021"
 
+[workspace]
+members = ["viewer"]
+
 [profile.release]
 opt-level = 3
 lto = "fat"
