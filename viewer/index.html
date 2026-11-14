@@ -3,14 +3,321 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>bin2bmp viewer</title>
-<link data-trunk rel="rust" data-wasm-opt="0">
+<title>3D byte graphs</title>
 <style>
-  html, body { margin: 0; height: 100%; overflow: hidden; background: #0b0b0e; }
-  canvas { display: block; width: 100%; height: 100%; }
+  html, body { margin: 0; height: 100%; background: #0b0b0e; color: #ddd; font: 12px/1.4 ui-monospace, monospace; overflow: hidden; }
+  #info { position: absolute; top: 10px; left: 10px; background: rgba(20,20,26,.8); border: 1px solid #333; border-radius: 6px; padding: 8px 10px; white-space: pre; pointer-events: none; }
+  #axes { position: absolute; bottom: 10px; left: 10px; color: #888; }
+  #files { position: absolute; left: 10px; bottom: 36px; width: 250px; max-height: 50%; overflow-y: auto; }
+  .file { display: flex; gap: 8px; align-items: center; padding: 5px; margin-top: 4px; background: rgba(20,20,26,.8); border: 1px solid #333; border-radius: 6px; cursor: pointer; }
+  .file.on { border-color: #2b5cff; background: rgba(43,92,255,.2); }
+  .file canvas { width: 48px; height: 48px; flex: none; background: #000; border-radius: 3px; image-rendering: pixelated; }
+  .file .meta { flex: 1; min-width: 0; }
+  .file .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .file .sub { color: #888; }
+  .file button { padding: 0 6px; border: 0; background: none; color: #888; font: inherit; font-size: 16px; cursor: pointer; }
+  #drop { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; font-size: 22px; background: rgba(43,92,255,.2); border: 3px dashed #2b5cff; pointer-events: none; }
+  .lil-gui.root { --width: 290px; }
 </style>
 </head>
 <body>
-<canvas id="viewer"></canvas>
+<div id="info"></div>
+<div id="files"></div>
+<div id="axes"></div>
+<div id="drop">Drop files to graph them</div>
+<input type="file" id="file" multiple hidden>
+
+<script id="pure">
+// No DOM in this block: viewer/test.js runs it in node.
+const MODES = ["Trigraph", "Digraph", "Digraph over file"];
+const SLICES = 256;
+
+// fixed-seed PRNG so live updates don't shimmer between rebuilds
+const prng = (a = 0x9E3779B9) => () => {  // mulberry32
+  let t = (a = (a + 0x6D2B79F5) | 0);
+  t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+};
+
+// One shared 24-bit table; only touched keys are reset between runs.
+const tables = () => ({ cnt: new Uint32Array(1 << 24), first: new Uint32Array(1 << 24), touched: new Uint32Array(0), nTouched: 0 });
+
+// Counts the pairs/triples in the window P.start/P.length (percent), every P.step bytes from P.phase.
+function count(bytes, P, T, cap) {
+  const tri = P.mode === "Trigraph", layers = P.mode === "Digraph over file", w = tri ? 2 : 1;
+  for (let i = 0; i < T.nTouched; i++) T.cnt[T.touched[i]] = 0;
+  const lo = Math.floor(bytes.length * P.start / 100);
+  const hi = Math.min(bytes.length - w, lo + Math.floor(bytes.length * P.length / 100));
+  const step = P.step, phase = P.phase % step, span = Math.max(1, hi - lo);
+  const nPos = Math.max(0, Math.floor((hi - lo - phase - 1) / step) + 1);
+  const sampled = nPos > cap, n = sampled ? cap : nPos, rnd = prng();
+  if (T.touched.length < n) T.touched = new Uint32Array(n);
+  T.nTouched = 0;
+  for (let j = 0; j < n; j++) {
+    // random positions when over the cap: no alignment bias
+    const i = lo + phase + step * (sampled ? Math.floor(rnd() * nPos) : j);
+    let k = tri ? (bytes[i] << 16) | (bytes[i + 1] << 8) | bytes[i + 2] : (bytes[i] << 8) | bytes[i + 1];
+    if (layers) k |= Math.floor((i - lo) * SLICES / span) << 16;
+    if (T.cnt[k]++ === 0) { T.touched[T.nTouched++] = k; T.first[k] = i; }
+  }
+  return { lo, hi, n, sampled };
+}
+
+// The counted keys that pass the count filter; more than `cap` are thinned to a fixed random subset.
+function select(T, minCount, maxCount, cap) {
+  const keep = [];
+  let max = 1;
+  for (let i = 0; i < T.nTouched; i++) {
+    const k = T.touched[i], c = T.cnt[k];
+    if (c >= minCount && (!maxCount || c <= maxCount)) { keep.push(k); if (c > max) max = c; }
+  }
+  const unique = keep.length;
+  if (unique > cap) {
+    const rnd = prng(7); for (let i = unique - 1; i > 0; i--) { const j = (rnd() * (i + 1)) | 0; [keep[i], keep[j]] = [keep[j], keep[i]]; }
+    keep.length = cap;
+  }
+  return { keep, unique, max };
+}
+
+// Where a key sits in the unit cube; t is its normalised count, 0..1.
+function place(mode, k, t) {
+  const hi = k >> 16 & 255, mid = k >> 8 & 255, lo = k & 255;
+  if (mode === "Trigraph") return [hi / 255, lo / 255, mid / 255];
+  return [mid / 255, mode === "Digraph" ? t : hi / (SLICES - 1), lo / 255];
+}
+
+// bin2bmp-style thumbnail: the file as a near-square greyscale image, sampled down to size×size RGBA.
+function byteMap(bytes, size) {
+  const px = new Uint8ClampedArray(size * size * 4);
+  const width = Math.ceil(Math.sqrt(bytes.length)) || 1, height = Math.ceil(bytes.length / width) || 1;
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+    const v = bytes[Math.floor(y * height / size) * width + Math.floor(x * width / size)] ?? 0;
+    px.set([v, v, v, 255], (y * size + x) * 4);
+  }
+  return px;
+}
+
+function human(n) {
+  for (const unit of ["B", "KB", "MB"]) { if (n < 1024 || unit === "MB") return (unit === "B" ? n : n.toFixed(1)) + " " + unit; n /= 1024; }
+}
+
+if (typeof module !== "undefined") module.exports = { MODES, prng, tables, count, select, place, byteMap, human };
+</script>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
+  "lil-gui": "https://cdn.jsdelivr.net/npm/lil-gui@0.19.2/dist/lil-gui.esm.min.js"
+} }
+</script>
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import GUI from "lil-gui";
+
+const PREVIEW_SAMPLES = 0.5e6, THUMB = 96;
+const $ = id => document.getElementById(id);
+const T = tables();
+
+const P = {
+  open: () => $("file").click(),
+  mode: MODES[0],
+  start: 0, length: 100, step: 1, phase: 0, maxSamples: 4,
+  minCount: 1, maxCount: 0,
+  colorBy: "count", scale: "log", size: 2, opacity: 0.7, additive: false, maxPoints: 400,
+  rotate: true, speed: 0.8, box: true, projection: "perspective",
+};
+const files = [];
+let current;
+
+// ---------- three ----------
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(devicePixelRatio);
+document.body.prepend(renderer.domElement);
+const scene = new THREE.Scene();
+const persp = new THREE.PerspectiveCamera(50, 1, 0.01, 100);
+const ortho = new THREE.OrthographicCamera(-1, 1, 1, -1, -100, 100);  // frustum set in resize()
+let camera = persp;
+const controls = new OrbitControls(camera, renderer.domElement);
+
+// isometric = orthographic seen along (1,1,1): ~35.26° down, 45° around
+function setProjection() {
+  const iso = P.projection === "isometric";
+  camera = controls.object = iso ? ortho : persp;
+  // flush leftover damping momentum, otherwise it nudges the camera off the exact angle
+  controls.enableDamping = false; controls.update();
+  if (iso) { ortho.position.set(3, 3, 3); ortho.zoom = 1; } else persp.position.set(1.9, 1.3, 1.9);
+  controls.target.set(0, 0, 0); applyPan(); controls.update(); controls.enableDamping = true;
+}
+controls.enableDamping = true; controls.autoRotate = true;
+controls.enablePan = false;  // keep the pivot on the cube centre (0,0,0)
+
+// Our own pan: shift the projection on screen instead of moving the orbit target.
+const pan = { x: 0, y: 0 };
+const applyPan = () => { for (const c of [persp, ortho]) c.setViewOffset(innerWidth, innerHeight, -pan.x, -pan.y, innerWidth, innerHeight); };
+renderer.domElement.addEventListener("pointerdown", e => {
+  if (!(e.button === 2 || (e.button === 0 && e.shiftKey))) return;
+  const el = renderer.domElement, sx = e.clientX - pan.x, sy = e.clientY - pan.y;
+  el.setPointerCapture(e.pointerId);
+  const move = m => { pan.x = m.clientX - sx; pan.y = m.clientY - sy; applyPan(); };
+  const up = () => { el.removeEventListener("pointermove", move); el.removeEventListener("pointerup", up); };
+  el.addEventListener("pointermove", move); el.addEventListener("pointerup", up);
+});
+let idle;
+controls.addEventListener("start", () => { clearTimeout(idle); controls.autoRotate = false; });
+controls.addEventListener("end", () => { idle = setTimeout(() => controls.autoRotate = P.rotate, 3000); });
+
+const box = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1)), new THREE.LineBasicMaterial({ color: 0x444455 }));
+scene.add(box);
+const mat = new THREE.PointsMaterial({ vertexColors: true, sizeAttenuation: false, transparent: true, depthWrite: false });
+let points;
+
+function applyLook() {
+  mat.size = P.size; mat.opacity = P.opacity;
+  mat.blending = P.additive ? THREE.AdditiveBlending : THREE.NormalBlending; mat.needsUpdate = true;
+  controls.autoRotateSpeed = P.speed; box.visible = P.box;
+  controls.autoRotate = P.rotate;
+}
+
+// ---------- graph ----------
+function build(preview = false) {
+  document.querySelectorAll(".file").forEach(card => card.classList.toggle("on", card.file === current));
+  if (points) { scene.remove(points); points.geometry.dispose(); points = null; }
+  if (!current) { $("info").textContent = "Open or drop a file."; $("axes").textContent = ""; return; }
+  const t0 = performance.now(), { bytes, name } = current;
+  const cap = preview ? Math.min(PREVIEW_SAMPLES, P.maxSamples * 1e6) : P.maxSamples * 1e6;
+  const { lo, hi, n, sampled } = count(bytes, P, T, cap);
+  const { keep, unique, max } = select(T, P.minCount, P.maxCount, P.maxPoints * 1e3);
+  const norm = P.scale === "log" ? c => Math.log(c + 1) / Math.log(max + 1) : c => c / max;
+  const pos = new Float32Array(keep.length * 3), col = new Float32Array(keep.length * 3), c3 = new THREE.Color();
+  const span = Math.max(1, hi - lo);
+  keep.forEach((k, i) => {
+    const t = norm(T.cnt[k]);
+    pos.set(place(P.mode, k, t).map(v => v - .5), i * 3);
+    if (P.colorBy === "count") c3.setHSL(0.66 - 0.66 * t, 1, 0.3 + 0.35 * t);   // blue rare → red common
+    else c3.setHSL(0.8 * (T.first[k] - lo) / span, 0.9, 0.55);                   // rainbow by first file offset
+    col.set([c3.r, c3.g, c3.b], i * 3);
+  });
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+  g.setAttribute("color", new THREE.BufferAttribute(col, 3));
+  points = new THREE.Points(g, mat); scene.add(points);
+
+  const hex = v => "0x" + v.toString(16).toUpperCase();
+  const what = { "Trigraph": "triplets", "Digraph": "pairs", "Digraph over file": "pairs × layers" }[P.mode];
+  $("info").textContent =
+    `${name}  (${bytes.length.toLocaleString()} B)\n` +
+    `window   ${hex(lo)} – ${hex(hi)}\n` +
+    `samples  ${n.toLocaleString()}${sampled ? (preview ? " (preview)" : " (random)") : ""}  step ${P.step} phase ${P.phase % P.step}\n` +
+    `shown    ${keep.length.toLocaleString()} / ${unique.toLocaleString()} unique ${what}\n` +
+    `max      ${max.toLocaleString()}×   (${(performance.now() - t0).toFixed(0)} ms)`;
+  $("axes").textContent = {
+    "Trigraph": "x = b[i]   y = b[i+2]   z = b[i+1]",
+    "Digraph": "x = b[i]   z = b[i+1]   height = count",
+    "Digraph over file": "x = b[i]   z = b[i+1]   height = position in the window",
+  }[P.mode] + `   colour = ${P.colorBy === "count" ? "count (blue → red)" : "file offset (red → purple)"}`;
+}
+
+// one rebuild per frame at most; preview while dragging, full on release
+let queued = false, wantPreview = false;
+function schedule(preview) {
+  wantPreview = preview;
+  if (!queued) { queued = true; requestAnimationFrame(() => { queued = false; build(wantPreview); }); }
+}
+const live = c => c.onChange(() => schedule(true)).onFinishChange(() => schedule(false));
+
+// ---------- gui ----------
+const gui = new GUI({ title: "3D byte graphs" });
+const fData = gui.addFolder("Data");
+fData.add(P, "open").name("Open files…");
+fData.add(P, "mode", MODES).onChange(() => schedule(false));
+
+const fWin = gui.addFolder("Window & sampling");
+live(fWin.add(P, "start", 0, 100, 0.1).name("start %"));
+live(fWin.add(P, "length", 0.1, 100, 0.1).name("length %"));
+live(fWin.add(P, "step", 1, 16, 1).name("step (bytes)"));
+live(fWin.add(P, "phase", 0, 15, 1).name("phase"));
+live(fWin.add(P, "maxSamples", 0.5, 16, 0.5).name("max samples (M)"));
+
+const fFilt = gui.addFolder("Filter");
+live(fFilt.add(P, "minCount", 1, 100, 1).name("min count"));
+live(fFilt.add(P, "maxCount", 0, 10000, 1).name("max count (0 = off)"));
+
+const fLook = gui.addFolder("Look");
+fLook.add(P, "colorBy", ["count", "offset"]).name("colour by").onChange(() => schedule(false));
+fLook.add(P, "scale", ["log", "linear"]).onChange(() => schedule(false));
+fLook.add(P, "size", 0.5, 10, 0.5).name("point size").onChange(applyLook);
+fLook.add(P, "opacity", 0.05, 1, 0.05).onChange(applyLook);
+fLook.add(P, "additive").name("additive blend").onChange(applyLook);
+live(fLook.add(P, "maxPoints", 50, 2000, 50).name("max points (k)"));
+fLook.add(P, "box").name("show cube").onChange(applyLook);
+
+const fCam = gui.addFolder("Camera");
+fCam.add(P, "rotate").name("auto-rotate").onChange(applyLook);
+fCam.add(P, "speed", 0, 5, 0.1).name("rotate speed").onChange(applyLook);
+fCam.add(P, "projection", ["perspective", "isometric"]).onChange(setProjection);
+fCam.add({ reset: () => { pan.x = pan.y = 0; setProjection(); } }, "reset").name("Reset view");
+
+// ---------- files ----------
+// Card with a preview: the picture itself if the browser can decode it, otherwise a byte map.
+async function addFile(name, bytes) {
+  const file = { name, bytes };
+  const card = document.createElement("div"), canvas = document.createElement("canvas"), meta = document.createElement("div");
+  const title = document.createElement("div"), sub = document.createElement("div"), remove = document.createElement("button");
+  card.className = "file"; card.file = file; meta.className = "meta"; title.className = "name"; sub.className = "sub";
+  canvas.width = canvas.height = THUMB;
+  title.textContent = title.title = name; remove.textContent = "×"; remove.title = "Remove";
+  meta.append(title, sub); card.append(canvas, meta, remove);
+  const ctx = canvas.getContext("2d");
+  try {
+    const picture = await createImageBitmap(new Blob([bytes]));
+    const scale = Math.min(THUMB / picture.width, THUMB / picture.height), w = picture.width * scale, h = picture.height * scale;
+    canvas.style.imageRendering = "auto";
+    ctx.drawImage(picture, (THUMB - w) / 2, (THUMB - h) / 2, w, h);
+    sub.textContent = `${human(bytes.length)} · image ${picture.width}×${picture.height}`;
+  } catch {
+    ctx.putImageData(new ImageData(byteMap(bytes, THUMB), THUMB), 0, 0);
+    sub.textContent = `${human(bytes.length)} · byte map`;
+  }
+  card.onclick = () => { current = file; build(); };
+  remove.onclick = event => {
+    event.stopPropagation();
+    files.splice(files.indexOf(file), 1); card.remove();
+    if (current === file) current = files[0];
+    build();
+  };
+  files.push(file); $("files").append(card);
+  return file;
+}
+
+async function openFiles(list) {
+  let last;
+  for (const f of list) last = await addFile(f.name, new Uint8Array(await f.arrayBuffer()));
+  if (last) { current = last; build(); }
+}
+$("file").onchange = () => openFiles($("file").files);
+addEventListener("dragover", e => { e.preventDefault(); $("drop").style.display = "flex"; });
+addEventListener("dragleave", e => { if (!e.relatedTarget) $("drop").style.display = "none"; });
+addEventListener("drop", e => { e.preventDefault(); $("drop").style.display = "none"; openFiles(e.dataTransfer.files); });
+
+function resize() {
+  renderer.setSize(innerWidth, innerHeight);
+  const a = innerWidth / innerHeight; persp.aspect = a; ortho.left = -a; ortho.right = a;
+  applyPan();
+}
+addEventListener("resize", resize); resize(); setProjection();
+applyLook();
+(function loop() { controls.update(); renderer.render(scene, camera); requestAnimationFrame(loop); })();
+
+// Built-in samples so there is something to look at before a file is opened.
+const noise = new Uint8Array(200_000);
+for (let i = 0; i < noise.length; i += 65536) crypto.getRandomValues(noise.subarray(i, i + 65536));
+const signal = noise.map((n, i) => 128 + 70 * Math.sin(i / 40) + 40 * Math.sin(i / 7.3) + (n & 7) - 4);
+current = await addFile("this page (text)", new TextEncoder().encode(document.documentElement.outerHTML));
+await addFile("smooth signal (like raw audio or pixels)", signal);
+await addFile("random bytes (like encrypted data)", noise);
+build();
+</script>
 </body>
 </html>

@@ -71,28 +71,15 @@ write_bmp(file, len, std::io::stdout().lock(), &Options::default())?;
 
 ## Viewer
 
-`viewer/` is a small [egui](https://github.com/emilk/egui) app on top of the library. It is its own crate, so the library and the CLI stay dependency-free. Open or drop files; each one is listed with its name, size and a preview (the picture itself for images, a byte map for everything else).
+`viewer/index.html` is a standalone page for looking at files in 3D. Open it in a browser and drop files on it; they stay on your machine. It loads [three.js](https://threejs.org) and [lil-gui](https://lil-gui.georgealways.com) from a CDN, so it needs a connection the first time.
 
-- **2D maps** — every mode of the CLI (`bytes`, `class`, `bit`, `entropy`, `chi`, `digraph`), in rows or Hilbert layout, with zoom and pan.
-- **3D graphs**
-  - **Trigraph** — every three neighbouring bytes are one point in a cube. Text is a small clump, raw audio or pixels a rod along the diagonal, compressed or encrypted data fills the cube.
-  - **Digraph + height** — the flat digraph with each pair raised by how often it occurs.
-  - **Digraph over file** — the digraph stacked by position in the file, so the file's sections show up as layers.
+- **Trigraph** — every three neighbouring bytes are one point in a cube. Text is a small clump, raw audio or pixels a rod along the diagonal, compressed or encrypted data fills the cube.
+- **Digraph** — the flat digraph with each pair raised by how often it occurs.
+- **Digraph over file** — the digraph stacked by position in the file, so the file's sections show up as layers.
 
-  Points are coloured by how often they occur or by where in the file they first occur.
+The panel narrows the graph to a window of the file, samples every n-th byte, filters by count, and switches colouring between count and file offset. Each opened file is listed with its name, size and a preview: the picture itself for images the browser can decode, a byte map for everything else.
 
-Desktop:
-
-```sh
-cargo run --release -p bin2bmp-viewer
-```
-
-Browser (wasm, files stay on your machine), with [Trunk](https://trunkrs.dev):
-
-```sh
-rustup target add wasm32-unknown-unknown
-cd viewer && trunk serve --release      # or `trunk build --release` for a static site in viewer/dist
-```
+`node viewer/test.js` checks the counting and placement logic.
 
 ## Output format
 
