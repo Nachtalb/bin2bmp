@@ -163,6 +163,7 @@ const P = {
   colorBy: "count", scale: "log", size: 2, opacity: 0.7, additive: false, maxPoints: 400,
   rotate: true, speed: 0.8, box: true, projection: "perspective", snap: 0,
   exportScale: 2, save: () => savePng(),
+  panelOpacity: innerWidth < 700 ? 0.6 : 1,  // on a phone the panel lies over the graph
 };
 const files = [];
 let current;
@@ -343,6 +344,9 @@ const live = c => c.onChange(() => schedule(true)).onFinishChange(() => schedule
 
 // ---------- gui ----------
 const gui = new GUI({ title: "bin2bmp viewer" });
+const fade = () => { gui.domElement.style.opacity = P.panelOpacity; };
+gui.add(P, "panelOpacity", 0.15, 1, 0.05).name("panel opacity").onChange(fade);
+fade();
 const fData = gui.addFolder("Data");
 fData.add(P, "open").name("Open files…");
 fData.add(P, "view", ["3D graph", "2D map"]).onChange(showFolders);
