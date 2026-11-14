@@ -221,7 +221,9 @@ function snapView() {
 function stepGlide() {
   const k = Math.min(1, (performance.now() - glide.t0) / SNAP_MS), eased = 1 - (1 - k) ** 3;  // fast start, soft landing
   const at = (from, to) => (from + (to - from) * eased) * Math.PI / 180;
-  camera.position.setFromSphericalCoords(glide.distance, Math.PI / 2 - at(glide.up0, glide.up), at(glide.around0, glide.around));
+  // stop a hair short of straight up or down: exactly there the camera sits on the axis and the angle around is lost
+  const polar = Math.min(Math.PI - 1e-6, Math.max(1e-6, Math.PI / 2 - at(glide.up0, glide.up)));
+  camera.position.setFromSphericalCoords(glide.distance, polar, at(glide.around0, glide.around));
   if (k === 1) endGlide();
 }
 function endGlide() { glide = null; controls.enableDamping = true; }
