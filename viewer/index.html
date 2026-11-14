@@ -202,20 +202,31 @@ renderer.domElement.addEventListener("pointerdown", e => {
   const up = () => { el.removeEventListener("pointermove", move); el.removeEventListener("pointerup", up); };
   el.addEventListener("pointermove", move); el.addEventListener("pointerup", up);
 });
-// Turns the camera to the nearest multiple of P.snap degrees, around and up/down.
+// Glides the camera to the nearest multiple of P.snap degrees, around and up/down.
 // The isometric elevation (the "Reset view" angle in that projection) is always a stop too.
 const ISO = Math.atan(Math.SQRT1_2) * 180 / Math.PI;  // 35.26°
+const SNAP_MS = 300;
+let glide;  // the snap in progress: start and target angles in degrees
 function snapView() {
   if (!P.snap) return;
-  controls.enableDamping = false; controls.update();  // flush leftover momentum, as in setProjection
-  const rad = Math.PI / 180, distance = camera.position.length();
-  const around = snapAngle(controls.getAzimuthalAngle() / rad, P.snap);
-  const up = snapAngle(90 - controls.getPolarAngle() / rad, P.snap, [ISO, -ISO]);
-  camera.position.setFromSphericalCoords(distance, (90 - up) * rad, around * rad);
-  controls.update(); controls.enableDamping = true;
+  const angles = () => [controls.getAzimuthalAngle() * 180 / Math.PI, 90 - controls.getPolarAngle() * 180 / Math.PI];
+  const [around0, up0] = angles();
+  // let the leftover momentum land unseen, so the stop is picked from where the drag was heading; damping stays off while gliding
+  controls.enableDamping = false; controls.update();
+  const [landed, up1] = angles();
+  glide = { t0: performance.now(), distance: camera.position.length(), around0, up0,
+            around: around0 + (snapAngle(landed, P.snap) - around0 + 540) % 360 - 180,  // the short way round
+            up: snapAngle(up1, P.snap, [ISO, -ISO]) };
 }
+function stepGlide() {
+  const k = Math.min(1, (performance.now() - glide.t0) / SNAP_MS), eased = 1 - (1 - k) ** 3;  // fast start, soft landing
+  const at = (from, to) => (from + (to - from) * eased) * Math.PI / 180;
+  camera.position.setFromSphericalCoords(glide.distance, Math.PI / 2 - at(glide.up0, glide.up), at(glide.around0, glide.around));
+  if (k === 1) endGlide();
+}
+function endGlide() { glide = null; controls.enableDamping = true; }
 let idle;
-controls.addEventListener("start", () => { clearTimeout(idle); controls.autoRotate = false; });
+controls.addEventListener("start", () => { clearTimeout(idle); controls.autoRotate = false; if (glide) endGlide(); });
 controls.addEventListener("end", () => { snapView(); idle = setTimeout(() => controls.autoRotate = P.rotate, 3000); });
 
 const box = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1)), new THREE.LineBasicMaterial({ color: 0x444455 }));
@@ -486,7 +497,7 @@ addEventListener("resize", resize); resize(); setProjection();
 applyLook();
 (function loop() {
   const flat = P.view !== "3D graph";
-  if (!flat) { controls.update(); renderer.render(scene, camera); }  // nothing to draw behind a 2D map
+  if (!flat) { if (glide) stepGlide(); controls.update(); renderer.render(scene, camera); }  // nothing to draw behind a 2D map
   const deg = a => (Math.round(a * 1800 / Math.PI) / 10 || 0).toFixed(1);
   const angle = flat ? "" : `view   ${deg(controls.getAzimuthalAngle())}° around, ${deg(Math.PI / 2 - controls.getPolarAngle())}° up`;
   if ($("angle").textContent !== angle) $("angle").textContent = angle;
